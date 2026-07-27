@@ -8,6 +8,7 @@ import os
 import io
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
+import plotly.express as px
 
 # 1. Page Configuration
 st.set_page_config(layout="wide", page_title="CEI & QOE Profiler")
@@ -361,7 +362,7 @@ def load_local_geojson(level):
     folder_name = "geojson_data"
     
     file_map = {
-        'brgy': 'barangays.geojson',
+        'brgy': 'visayas_barangays.geojson',
         'town': 'municipalities.geojson',
         'province': 'provinces.geojson'
     }
@@ -397,22 +398,59 @@ with col1:
     
     st.markdown("---")
     st.markdown("**CUSTOMER EXPERIENCE INDEX (CEI)**")
-    avg_cei = get_avg(filtered_df, 'AVG CEI')
-    st.metric(label="Overall AVG CEI", value=f"{avg_cei:.2f}")
-    st.write(f"**AVG Data CEI:** {get_avg(filtered_df, 'AVG Data CEI'):.2f}")
-    st.write(f"**AVG Voice CEI:** {get_avg(filtered_df, 'AVG Voice CEI'):.2f}")
+    
+    # 1. Main Overall Metric
+    st.metric(
+        label="Overall AVG CEI", 
+        value=f"{get_avg(filtered_df, 'AVG CEI'):.2f}",
+        help="**Source:** Derived directly from the 'AVG CEI' column in your dataset.\n\n**Calculation:** The arithmetic mean (average) of all overall CEI scores matching your current Year, Month, and Location filters."
+    )
+    
+    cei_col1, cei_col2 = st.columns(2)
+    with cei_col1:
+        st.metric(
+            label="Data CEI", 
+            value=f"{get_avg(filtered_df, 'AVG Data CEI'):.2f}",
+            help="**Source:** 'AVG Data CEI' column.\n\n**Calculation:** The calculated average of data-specific customer experience index scores across the filtered selection."
+        )
+    with cei_col2:
+        st.metric(
+            label="Voice CEI", 
+            value=f"{get_avg(filtered_df, 'AVG Voice CEI'):.2f}",
+            help="**Source:** 'AVG Voice CEI' column.\n\n**Calculation:** The calculated average of voice-specific customer experience index scores across the filtered selection."
+        )
 
     st.markdown("---")
     st.markdown("**QUALITY OF EXPERIENCE (QoE)**")
-    st.write(f"**AVG Stream QOE:** {get_avg(filtered_df, 'AVG Stream QOE'):.2f}")
-    st.write(f"**AVG Game QOE:** {get_avg(filtered_df, 'AVG Game QOE'):.2f}")
-    st.write(f"**AVG Web QOE:** {get_avg(filtered_df, 'AVG Web QOE'):.2f}")
-    st.write(f"**AVG Volte QOE:** {get_avg(filtered_df, 'AVG Volte QOE'):.2f}")
+    
+    qoe_col1, qoe_col2 = st.columns(2)
+    with qoe_col1:
+        st.metric(
+            label="Stream QoE", 
+            value=f"{get_avg(filtered_df, 'AVG Stream QOE'):.2f}",
+            help="**Source:** 'AVG Stream QOE' column.\n\n**Calculation:** The mean score representing the video and audio streaming quality of experience."
+        )
+        st.metric(
+            label="Web QoE", 
+            value=f"{get_avg(filtered_df, 'AVG Web QOE'):.2f}",
+            help="**Source:** 'AVG Web QOE' column.\n\n**Calculation:** The mean score representing the web browsing quality of experience."
+        )
+    with qoe_col2:
+        st.metric(
+            label="Game QoE", 
+            value=f"{get_avg(filtered_df, 'AVG Game QOE'):.2f}",
+            help="**Source:** 'AVG Game QOE' column.\n\n**Calculation:** The mean score representing the mobile gaming quality of experience."
+        )
+        st.metric(
+            label="VoLTE QoE", 
+            value=f"{get_avg(filtered_df, 'AVG Volte QOE'):.2f}",
+            help="**Source:** 'AVG Volte QOE' column.\n\n**Calculation:** The mean score representing the Voice over LTE network quality of experience."
+        )
 
 with col2:
     st.subheader("Geographic Profiling Map")
     
-    m = folium.Map(location=[12.8797, 121.7740], zoom_start=6)
+    m = folium.Map(location=[12.8797, 121.7740], zoom_start=6, tiles="CartoDB positron")
     
     Fullscreen(
         position='topleft',
@@ -424,13 +462,22 @@ with col2:
     if psgc_col and master_geo_data and not filtered_df.empty:
         active_psgcs = set(filtered_df[psgc_col].tolist())
         
+        # Centralized calculation for overall CEI consistency
+        overall_avg_cei = round(get_avg(filtered_df, 'AVG CEI'), 2)
+        
         filtered_geo_features = []
         for feature in master_geo_data['features']:
             props = feature['properties']
             
-            psgc_match = props.get('psgc_code') in active_psgcs
+            # 1. Try to find the exact PSGC code
+            raw_psgc = props.get('psgc_code')
+            psgc_match = raw_psgc in active_psgcs if raw_psgc else False
             
-            adm_code = props.get('ADM4_PCODE', props.get('ADM3_PCODE', props.get('ADM2_PCODE', '')))
+            # 2. Try to find the ADM PCODE
+            adm_code = (props.get('adm4_pcode') or props.get('ADM4_PCODE') or 
+                        props.get('adm3_pcode') or props.get('ADM3_PCODE') or 
+                        props.get('adm2_pcode') or props.get('ADM2_PCODE') or '')
+            
             adm_match = False
             clean_adm = ""
             if adm_code and adm_code.startswith('PH'):
@@ -438,17 +485,21 @@ with col2:
                 adm_match = clean_adm in active_psgcs
             
             if psgc_match or adm_match:
-                matched_key = props.get('psgc_code') if psgc_match else clean_adm
+                matched_key = raw_psgc if psgc_match else clean_adm
+                loc_df = filtered_df[filtered_df[psgc_col] == matched_key]
                 
-                matched_row = filtered_df[filtered_df[psgc_col] == matched_key].iloc[0]
-                loc_name = props.get('ADM4_EN', props.get('ADM3_EN', props.get('ADM2_EN', 'Unknown Location')))
+                # 3. Get Location Name
+                loc_name = (props.get('adm4_name') or props.get('ADM4_EN') or 
+                            props.get('adm3_name') or props.get('ADM3_EN') or 
+                            props.get('adm2_name') or props.get('ADM2_EN') or 'Unknown Location')
                 
                 feature['properties']['unified_key'] = matched_key
                 feature['properties']['Location'] = loc_name
                 
-                feature['properties']['Avg_CEI'] = round(matched_row.get('AVG CEI', 0), 2)
-                feature['properties']['Data_CEI'] = round(matched_row.get('AVG Data CEI', 0), 2)
-                feature['properties']['Voice_CEI'] = round(matched_row.get('AVG Voice CEI', 0), 2)
+                # --- ALIGNED OVERALL CEI (Using Mean Across Grouped Subset) ---
+                feature['properties']['Avg_CEI'] = round(loc_df['AVG CEI'].mean(), 2) if not loc_df.empty else overall_avg_cei
+                feature['properties']['Data_CEI'] = round(loc_df['AVG Data CEI'].mean(), 2) if not loc_df.empty else 0.0
+                feature['properties']['Voice_CEI'] = round(loc_df['AVG Voice CEI'].mean(), 2) if not loc_df.empty else 0.0
                 
                 filtered_geo_features.append(feature)
         
@@ -490,7 +541,7 @@ with col2:
             )
             choro.geojson.add_child(popup)
             
-            # 4. Legend & Popup Upward Shift CSS
+            # 4. Legend & Popup Styling + Layer Control Position Fix
             ui_styles = """
             <style>
             svg.leaflet-control.legend, .legend {
@@ -504,12 +555,37 @@ with col2:
             .leaflet-popup {
                 margin-bottom: 40px !important;
             }
+            /* Hide Leaflet Attribution Watermark */
+            .leaflet-control-attribution {
+                display: none !important;
+            }
+            /* Layer Icon positioned directly below the Fullscreen Control Icon */
+            .leaflet-control-layer-preview {
+                background: white;
+                border: 2px solid rgba(0,0,0,0.2);
+                border-radius: 4px;
+                cursor: pointer;
+                padding: 4px 7px;
+                font-size: 16px;
+                box-shadow: 0 1px 5px rgba(0,0,0,0.4);
+                text-align: center;
+                user-select: none;
+                margin-top: 6px !important; /* Stacked right under Fullscreen */
+                width: 30px;
+                height: 30px;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+            }
+            .leaflet-control-layer-preview:hover {
+                background: #f4f4f4;
+            }
             </style>
             """
             m.get_root().html.add_child(folium.Element(ui_styles))
             
-            # 5. --- INVERTED SELECTION & GRAYSCALE ENGINE ---
-            click_js = """
+            # 5. Press-and-Hold Original Color Preview & Grayscale Toggle JavaScript
+            click_and_reset_js = """
             <script>
             function bindMapInteractions() {
                 var folium_map = null;
@@ -524,6 +600,7 @@ with col2:
                 if (!folium_map) return false;
 
                 var all_features = [];
+                var selected_feature = null;
                 
                 folium_map.eachLayer(function(layer) {
                     if (layer.feature && layer.setStyle) {
@@ -542,27 +619,65 @@ with col2:
 
                 if (all_features.length === 0) return false;
 
-                all_features.forEach(function(layer) {
-                    layer.off('click');
-                    
-                    layer.on('click', function(e) {
-                        all_features.forEach(function(l) {
-                            l.setStyle({
-                                fillColor: '#cccccc', 
-                                color: '#d3d3d3',     
+                function restoreOriginalColors() {
+                    all_features.forEach(function(layer) {
+                        if (layer.originalStyle) {
+                            layer.setStyle(layer.originalStyle);
+                        }
+                    });
+                }
+
+                function applyGrayscaleState() {
+                    all_features.forEach(function(layer) {
+                        if (selected_feature && layer === selected_feature) {
+                            layer.setStyle({
+                                fillColor: layer.originalStyle.fillColor,
+                                color: '#ff0000',
+                                weight: 4,
+                                fillOpacity: 0.9,
+                                opacity: 1
+                            });
+                        } else {
+                            layer.setStyle({
+                                fillColor: '#cccccc',
+                                color: '#d3d3d3',
                                 fillOpacity: 0.7,
                                 opacity: 0.4,
                                 weight: 1
                             });
-                        });
+                        }
+                    });
+                }
+
+                if (!folium_map._layerControlAdded) {
+                    var layerControl = L.control({ position: 'topleft' });
+                    layerControl.onAdd = function(map) {
+                        var div = L.DomUtil.create('div', 'leaflet-control-layer-preview');
+                        div.innerHTML = '🥞';
+                        div.title = 'Hold to view original colors';
                         
-                        e.target.setStyle({
-                            fillColor: e.target.originalStyle.fillColor, 
-                            color: '#ff0000', 
-                            weight: 4,
-                            fillOpacity: 0.9,
-                            opacity: 1
+                        L.DomEvent.disableClickPropagation(div);
+
+                        L.DomEvent.on(div, 'mousedown touchstart', function(e) {
+                            restoreOriginalColors();
                         });
+
+                        L.DomEvent.on(div, 'mouseup mouseleave touchend', function(e) {
+                            applyGrayscaleState();
+                        });
+
+                        return div;
+                    };
+                    layerControl.addTo(folium_map);
+                    folium_map._layerControlAdded = true;
+                }
+
+                all_features.forEach(function(layer) {
+                    layer.off('click');
+                    
+                    layer.on('click', function(e) {
+                        selected_feature = e.target;
+                        applyGrayscaleState();
                         
                         if (!L.Browser.ie && !L.Browser.opera && !L.Browser.edge) {
                             e.target.bringToFront();
@@ -572,11 +687,8 @@ with col2:
 
                 folium_map.off('click');
                 folium_map.on('click', function(e) {
-                    all_features.eachLayer(function(layer) {
-                        if (layer.originalStyle) {
-                            layer.setStyle(layer.originalStyle);
-                        }
-                    });
+                    selected_feature = null;
+                    restoreOriginalColors();
                 });
                 
                 return true;
@@ -589,7 +701,7 @@ with col2:
             }, 500);
             </script>
             """
-            m.get_root().html.add_child(folium.Element(click_js))
+            m.get_root().html.add_child(folium.Element(click_and_reset_js))
             
             m.fit_bounds(m.get_bounds())
         else:
@@ -603,30 +715,26 @@ with col2:
 # --- TABBED DATA VIEW SECTION ---
 st.markdown("---")
 
-# Custom CSS for Enclosed Boxed Tabs with Bold, Larger Text
 tab_custom_css = """
 <style>
-/* Base Ribbon Line */
 div[data-baseweb="tab-list"] {
     border-bottom: 2px solid #000000 !important;
 }
 
-/* Enclosed Box Border, Bold Font & Larger Size for Tabs */
 button[data-baseweb="tab"] {
     border: 2px solid #a0a0a0 !important;
     border-radius: 8px 8px 0px 0px !important;
     padding: 12px 24px !important;
     margin-right: 6px !important;
-    font-weight: 900 !important; /* Extra Bold */
-    font-size: 18px !important; /* Increased Font Size */
+    font-weight: 900 !important;
+    font-size: 18px !important;
     background-color: #f1f3f6 !important;
     color: #555555 !important;
 }
 
-/* Selected Active Tab Highlight */
 button[data-baseweb="tab"][aria-selected="true"] {
     border: 2px solid #000000 !important;
-    border-bottom: 3px solid #ffffff !important; /* Seamlessly blends into the content area */
+    border-bottom: 3px solid #ffffff !important;
     background-color: #ffffff !important;
     color: #000000 !important;
 }
@@ -654,26 +762,114 @@ with tab_chart:
                     selected_metrics.append(col_name)
         
         if selected_metrics:
+            st.markdown("---")
+            agg_view = st.radio(
+                "Timeline View:", 
+                ["Monthly (Continuous)", "Year-over-Year (Overlaid Compare)"], 
+                horizontal=True
+            )
+            
             chart_data = filtered_df.copy()
             chart_data['Parsed_Date'] = pd.to_datetime(chart_data[time_col], errors='coerce')
             
-            chart_data = chart_data.groupby('Parsed_Date')[selected_metrics].mean().reset_index()
-            chart_data = chart_data.sort_values(by='Parsed_Date')
-            
-            chart_data[time_col] = chart_data['Parsed_Date'].dt.strftime('%b %Y')
-            chart_data = chart_data.set_index(time_col)
-            chart_data = chart_data.drop(columns=['Parsed_Date'])
-            
-            # Preserve chronological sorting order across Streamlit reruns
-            chart_data.index = pd.CategoricalIndex(chart_data.index, categories=chart_data.index.tolist(), ordered=True)
-            
-            st.line_chart(chart_data, use_container_width=True, height=550)
+            if agg_view == "Year-over-Year (Overlaid Compare)":
+                chart_data['Month_Num'] = chart_data['Parsed_Date'].dt.month
+                chart_data['Month'] = chart_data['Parsed_Date'].dt.strftime('%b')
+                chart_data['Year'] = chart_data['Parsed_Date'].dt.year.astype(str)
+                
+                grouped = chart_data.groupby(['Month_Num', 'Month', 'Year'])[selected_metrics].mean().reset_index()
+                
+                pivot_df = pd.pivot_table(
+                    grouped,
+                    values=selected_metrics,
+                    index=['Month_Num', 'Month'],
+                    columns=['Year']
+                )
+                
+                pivot_df.columns = [f"{metric} ({year})" for metric, year in pivot_df.columns]
+                pivot_df = pivot_df.sort_index(level='Month_Num')
+                pivot_df = pivot_df.reset_index(level='Month')
+                pivot_df.index = pivot_df['Month']
+                pivot_df.drop(columns=['Month'], inplace=True)
+                
+                pivot_df = pivot_df.round(2)
+                
+                fig = px.line(
+                    pivot_df, 
+                    markers=True,
+                    color_discrete_sequence=px.colors.qualitative.Set1,
+                    labels={"value": "Score", "variable": "Metric", "Month": "Month"} 
+                )
+                
+                fig.update_traces(hovertemplate="%{y:.2f}")
+                
+                fig.update_layout(
+                    xaxis_title="Month",
+                    yaxis_title="Average Score",
+                    legend_title_text="Metrics by Year",
+                    hovermode="x unified",
+                    xaxis=dict(
+                        tickmode="linear", 
+                        tickangle=-45,
+                        showgrid=True,
+                        gridcolor="rgba(128, 128, 128, 0.1)",
+                        griddash="dot"
+                    ),
+                    yaxis=dict(
+                        showgrid=True,
+                        gridcolor="rgba(128, 128, 128, 0.1)",
+                        griddash="dot"
+                    ),
+                    margin=dict(l=0, r=0, t=30, b=0)
+                )
+                
+                st.plotly_chart(fig, use_container_width=True)
+                
+            else:
+                chart_data = chart_data.groupby('Parsed_Date')[selected_metrics].mean().reset_index()
+                chart_data = chart_data.sort_values(by='Parsed_Date')
+                
+                chart_data = chart_data.round(2) 
+                
+                fig = px.line(
+                    chart_data, 
+                    x='Parsed_Date', 
+                    y=selected_metrics,
+                    markers=True,
+                    color_discrete_sequence=px.colors.qualitative.Set1,
+                    labels={"value": "Score", "variable": "Metric", "Parsed_Date": "Month"} 
+                )
+                
+                fig.update_traces(hovertemplate="%{y:.2f}")
+                
+                fig.update_layout(
+                    xaxis_title="Timeline",
+                    yaxis_title="Average Score",
+                    legend_title_text="Metrics Overlay",
+                    hovermode="x unified",
+                    xaxis=dict(
+                        tickformat="%b %Y", 
+                        ticklabelmode="period",
+                        dtick="M1",        
+                        tickangle=-45,
+                        showgrid=True,
+                        gridcolor="rgba(128, 128, 128, 0.1)",
+                        griddash="dot"
+                    ),
+                    yaxis=dict(
+                        showgrid=True,
+                        gridcolor="rgba(128, 128, 128, 0.1)",
+                        griddash="dot"
+                    ),
+                    margin=dict(l=0, r=0, t=30, b=0)
+                )
+                
+                st.plotly_chart(fig, use_container_width=True)
         else:
             st.info("Please select at least one metric checkbox above to render the trend line chart.")
     else:
         st.caption("Trend line chart unavailable: Missing 'Monthly' time column or numeric 'AVG' performance metrics in the dataset.")
-
+                                  
 with tab_data:
     st.write("**RAW DATA VIEW:**")
     st.dataframe(filtered_df, use_container_width=True)
-# --------------------------------
