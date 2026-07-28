@@ -217,6 +217,8 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-# Ignore local Google API credentials
+# Local Google API credentials and temporary artifacts
 client_secret.json
-
+*.xlsb
+~$*
+* - Copy.py

@@ -10,6 +10,149 @@ from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 import plotly.express as px
 
+# --- MASTER XLSB CELL-SITE LOADER ---
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+MASTER_XLSB_FILE = os.path.join(APP_DIR, "2G 3G 4G 5G Network Grouplist (AEPM) 06.15.2026.xlsb")
+
+def _clean_columns(dataframe):
+    dataframe = dataframe.copy()
+    dataframe.columns = [str(column).strip() for column in dataframe.columns]
+    return dataframe
+
+def _find_column(dataframe, *names):
+    lookup = {str(column).strip().upper(): column for column in dataframe.columns}
+    return next((lookup.get(name.upper()) for name in names if lookup.get(name.upper())), None)
+
+def _find_sheet(sheet_names, requested):
+    key = lambda value: ''.join(char for char in str(value).upper() if char.isalnum())
+    wanted = key(requested)
+    return next((sheet for sheet in sheet_names if key(sheet) == wanted), None)
+
+def _network_psgc(value):
+    # Mirrors the original QOE PSGC logic below. Do not change the QOE logic.
+    if pd.isna(value):
+        return pd.NA
+    text = str(value).strip().split('.')[0]
+    if not text or text.lower() == 'nan':
+        return pd.NA
+    text = text.zfill(9)
+    return text[:2] + '0' + text[2:] if len(text) == 9 else text
+
+def _pla_id(value):
+    if pd.isna(value):
+        return pd.NA
+    return str(value).strip().removesuffix('.0')
+
+@st.cache_data(ttl=3600, show_spinner="Loading cell-site network data...")
+def load_master_network_file(file_path, file_modified_time):
+    """Load map coordinates and network summaries from the master XLSB workbook."""
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"Master XLSB file not found: {file_path}")
+
+    with pd.ExcelFile(file_path, engine="pyxlsb") as workbook:
+        base_sheet = _find_sheet(workbook.sheet_names, "Technology per Site")
+        if base_sheet is None:
+            raise ValueError("Missing worksheet: Technology per Site")
+
+        def base_columns(column):
+            name = str(column).strip().upper()
+            return name in {"PLA ID", "SITE NAME", "SITENAME", "LATITUDE", "LONGITUDE"} or "PSGC" in name
+
+        # Every supplied network worksheet has a count/blank row before its headers.
+        base = _clean_columns(pd.read_excel(
+            workbook, sheet_name=base_sheet, skiprows=1, usecols=base_columns
+        ))
+        pla_col = _find_column(base, "PLA ID")
+        lat_col = _find_column(base, "LATITUDE")
+        lon_col = _find_column(base, "LONGITUDE")
+        if not all((pla_col, lat_col, lon_col)):
+            raise ValueError("Technology per Site must contain PLA ID, Latitude, and Longitude columns.")
+
+        if pla_col != "PLA ID":
+            base.rename(columns={pla_col: "PLA ID"}, inplace=True)
+        base["PLA ID"] = base["PLA ID"].map(_pla_id)
+        base[lat_col] = pd.to_numeric(base[lat_col], errors="coerce")
+        base[lon_col] = pd.to_numeric(base[lon_col], errors="coerce")
+        for column in [column for column in base.columns if "PSGC" in column.upper()]:
+            base[column] = base[column].map(_network_psgc)
+
+        def sector_counts(technology):
+            sheet = _find_sheet(workbook.sheet_names, technology)
+            if sheet is None:
+                return pd.DataFrame(columns=["PLA ID", f"{technology}_Sector_Count"])
+            sector_df = _clean_columns(pd.read_excel(
+                workbook, sheet_name=sheet, skiprows=1,
+                usecols=lambda column: str(column).strip().upper() in {"PLA ID", "SECTOR NAME"},
+            ))
+            sector_pla = _find_column(sector_df, "PLA ID")
+            sector_name = _find_column(sector_df, "SECTOR NAME")
+            if sector_pla is None or sector_name is None:
+                return pd.DataFrame(columns=["PLA ID", f"{technology}_Sector_Count"])
+            sector_df["PLA ID"] = sector_df[sector_pla].map(_pla_id)
+            return (sector_df.dropna(subset=["PLA ID"])
+                    .groupby("PLA ID")[sector_name].nunique()
+                    .rename(f"{technology}_Sector_Count").reset_index())
+
+        for technology in ("2G", "4G", "5G"):
+            base = base.merge(sector_counts(technology), on="PLA ID", how="left")
+
+        decommissioned_only_sites = pd.DataFrame()
+        decom_sheet = _find_sheet(workbook.sheet_names, "decommissioned")
+        if decom_sheet:
+            decom = _clean_columns(pd.read_excel(
+                workbook, sheet_name=decom_sheet, skiprows=1,
+                usecols=lambda column: str(column).strip().upper() in {
+                    "PLA ID", "SITE NAME", "SITENAME", "LATITUDE", "LONGITUDE",
+                    "TOWN PSGC", "BRGY PSGC", "SITE STATUS", "REASON OF DISMANTLING"
+                },
+            ))
+            decom_pla = _find_column(decom, "PLA ID")
+            status_col = _find_column(decom, "SITE STATUS")
+            reason_col = _find_column(decom, "REASON OF DISMANTLING")
+            decom_lat = _find_column(decom, "LATITUDE")
+            decom_lon = _find_column(decom, "LONGITUDE")
+            if decom_pla is not None and status_col is not None:
+                statuses = pd.DataFrame({
+                    "PLA ID": decom[decom_pla].map(_pla_id),
+                    "SITE STATUS": decom[status_col],
+                    "REASON OF DISMANTLING": decom[reason_col] if reason_col else pd.NA,
+                }).dropna(subset=["PLA ID"]).drop_duplicates("PLA ID")
+                base = base.merge(statuses, on="PLA ID", how="left")
+
+                # Decommissioned sites can be absent from Technology per Site.
+                # Build marker records directly from their own coordinates/PSGC fields.
+                if decom_lat is not None and decom_lon is not None:
+                    decommissioned_only_sites = pd.DataFrame({
+                        "PLA ID": decom[decom_pla].map(_pla_id),
+                        lat_col: pd.to_numeric(decom[decom_lat], errors="coerce"),
+                        lon_col: pd.to_numeric(decom[decom_lon], errors="coerce"),
+                        "SITE STATUS": decom[status_col],
+                        "REASON OF DISMANTLING": decom[reason_col] if reason_col else pd.NA,
+                    })
+
+                    base_name_col = _find_column(base, "SITE NAME", "SITENAME")
+                    decom_name_col = _find_column(decom, "SITE NAME", "SITENAME")
+                    if base_name_col and decom_name_col:
+                        decommissioned_only_sites[base_name_col] = decom[decom_name_col]
+
+                    for base_psgc_col in [column for column in base.columns if "PSGC" in column.upper()]:
+                        decom_psgc_col = _find_column(decom, base_psgc_col)
+                        if decom_psgc_col:
+                            decommissioned_only_sites[base_psgc_col] = decom[decom_psgc_col].map(_network_psgc)
+
+                    decommissioned_only_sites = decommissioned_only_sites[
+                        ~decommissioned_only_sites["PLA ID"].isin(base["PLA ID"])
+                    ]
+
+    for column in ("2G_Sector_Count", "4G_Sector_Count", "5G_Sector_Count"):
+        base[column] = pd.to_numeric(base.get(column, 0), errors="coerce").fillna(0).astype(int)
+    base["SITE STATUS"] = base["SITE STATUS"].fillna("Active") if "SITE STATUS" in base else "Active"
+    if "REASON OF DISMANTLING" not in base:
+        base["REASON OF DISMANTLING"] = pd.NA
+    if not decommissioned_only_sites.empty:
+        base = pd.concat([base, decommissioned_only_sites], ignore_index=True, sort=False)
+    return base.dropna(subset=[lat_col, lon_col])
+
 # 1. Page Configuration
 st.set_page_config(layout="wide", page_title="CEI & QOE Profiler")
 
@@ -43,20 +186,20 @@ def drive_file_picker_modal(drive_service):
     curr_id, curr_name = st.session_state['drive_history'][idx]
 
     # Global Search Bar
-    search_term = st.text_input("🔍 Search Drive for a file:", placeholder="Type a filename...")
+    search_term = st.text_input("ðŸ” Search Drive for a file:", placeholder="Type a filename...")
     st.markdown("---")
 
     # Navigation Controls
     col1, col2, col3 = st.columns([1, 1, 4])
     with col1:
-        st.button("⬅️ Back", disabled=(idx == 0), on_click=go_back, use_container_width=True)
+        st.button("â¬…ï¸ Back", disabled=(idx == 0), on_click=go_back, use_container_width=True)
     with col2:
-        st.button("➡️ Forward", disabled=(idx == len(st.session_state['drive_history']) - 1), on_click=go_forward, use_container_width=True)
+        st.button("âž¡ï¸ Forward", disabled=(idx == len(st.session_state['drive_history']) - 1), on_click=go_forward, use_container_width=True)
     with col3:
         if not search_term:
-            st.caption(f"📍 **Location:** {curr_name}")
+            st.caption(f"ðŸ“ **Location:** {curr_name}")
         else:
-            st.caption("📍 **Location:** Global Search Results")
+            st.caption("ðŸ“ **Location:** Global Search Results")
 
     st.markdown("---")
 
@@ -88,14 +231,14 @@ def drive_file_picker_modal(drive_service):
         if folders and not search_term:
             st.markdown("**Folders**")
             for f in folders:
-                st.button(f"📁 {f['name']}", key=f"folder_{f['id']}", use_container_width=True, on_click=open_folder, args=(f['id'], f['name']))
+                st.button(f"ðŸ“ {f['name']}", key=f"folder_{f['id']}", use_container_width=True, on_click=open_folder, args=(f['id'], f['name']))
         
         st.markdown("**Data Files (Sheets, Excel, CSV)**")
         if data_files:
             file_dict = {f['name']: f for f in data_files}
             selected_file = st.radio("Select a file:", list(file_dict.keys()), label_visibility="collapsed")
             
-            if st.button("✅ Load Data", use_container_width=True, type="primary"):
+            if st.button("âœ… Load Data", use_container_width=True, type="primary"):
                 st.session_state['selected_sheet_id'] = file_dict[selected_file]['id']
                 st.session_state['selected_sheet_name'] = file_dict[selected_file]['name']
                 st.session_state['selected_sheet_mime'] = file_dict[selected_file]['mimeType']
@@ -203,7 +346,7 @@ elif data_source == "Connect via Google":
                 
                 st.sidebar.success("Secure connection established.")
                 
-                if st.sidebar.button("📂 Browse Google Drive", use_container_width=True):
+                if st.sidebar.button("ðŸ“‚ Browse Google Drive", use_container_width=True):
                     drive_file_picker_modal(drive_service)
                 
                 # Process the data if a file was successfully selected
@@ -351,6 +494,38 @@ if filtered_df.empty:
     st.warning("No data available for the selected filters.")
     st.stop()
 
+st.sidebar.markdown("### MAP SETTINGS")
+basemap_choice = st.sidebar.selectbox(
+    "Map Layout",
+    ("OpenStreetMap (Colored)", "CartoDB Voyager", "CartoDB Positron"),
+    help="Choose the background map style. OpenStreetMap shows colored roads and landmarks."
+)
+polygon_opacity = st.sidebar.slider(
+    "Polygon Shading Opacity",
+    min_value=0.10,
+    max_value=0.90,
+    value=0.55,
+    step=0.05,
+    help="Lower values make the background map and roads more visible."
+)
+polygon_border_opacity = st.sidebar.slider(
+    "Polygon Border Opacity",
+    min_value=0.10,
+    max_value=1.00,
+    value=0.70,
+    step=0.05,
+)
+show_active = st.sidebar.checkbox(
+    "Show Active Sites",
+    value=True,
+    help="Display active cell sites in red."
+)
+show_decom = st.sidebar.checkbox(
+    "Show Decommissioned Sites",
+    value=False,
+    help="Display decommissioned sites in gray."
+)
+
 def get_avg(dataframe, col_name):
     if col_name in dataframe.columns:
         return dataframe[col_name].mean()
@@ -449,8 +624,18 @@ with col1:
 
 with col2:
     st.subheader("Geographic Profiling Map")
+
+    tile_map = {
+        "OpenStreetMap (Colored)": "OpenStreetMap",
+        "CartoDB Voyager": "CartoDB Voyager",
+        "CartoDB Positron": "CartoDB positron",
+    }
     
-    m = folium.Map(location=[12.8797, 121.7740], zoom_start=6, tiles="CartoDB positron")
+    m = folium.Map(
+        location=[12.8797, 121.7740],
+        zoom_start=6,
+        tiles=tile_map[basemap_choice],
+    )
     
     Fullscreen(
         position='topleft',
@@ -461,6 +646,39 @@ with col2:
     
     if psgc_col and master_geo_data and not filtered_df.empty:
         active_psgcs = set(filtered_df[psgc_col].tolist())
+
+        try:
+            site_coords_df = load_master_network_file(
+                MASTER_XLSB_FILE, os.path.getmtime(MASTER_XLSB_FILE)
+            )
+        except Exception as network_error:
+            st.error(f"Unable to load cell-site data: {network_error}")
+            site_coords_df = pd.DataFrame()
+
+        filtered_sites = pd.DataFrame()
+        if not site_coords_df.empty:
+            site_psgc_cols = [column for column in site_coords_df.columns if "PSGC" in column.upper()]
+            lat_col = _find_column(site_coords_df, "LATITUDE")
+            lon_col = _find_column(site_coords_df, "LONGITUDE")
+            name_col = _find_column(site_coords_df, "SITE NAME", "SITENAME")
+            if site_psgc_cols and lat_col and lon_col:
+                site_mask = pd.Series(False, index=site_coords_df.index)
+                for site_psgc_col in site_psgc_cols:
+                    site_mask = site_mask | site_coords_df[site_psgc_col].isin(active_psgcs)
+                filtered_sites = site_coords_df[site_mask].copy()
+                is_active_site = filtered_sites["SITE STATUS"].astype(str).str.upper().eq("ACTIVE")
+                if show_active and not show_decom:
+                    filtered_sites = filtered_sites[is_active_site]
+                elif show_decom and not show_active:
+                    filtered_sites = filtered_sites[~is_active_site]
+                elif not show_active and not show_decom:
+                    filtered_sites = filtered_sites.iloc[0:0]
+
+        with st.popover("📊 View Cell Site Data", use_container_width=True):
+            if filtered_sites.empty:
+                st.info("No cell-site data is available for this selection.")
+            else:
+                st.dataframe(filtered_sites, use_container_width=True, height=400)
         
         # Centralized calculation for overall CEI consistency
         overall_avg_cei = round(get_avg(filtered_df, 'AVG CEI'), 2)
@@ -517,8 +735,8 @@ with col2:
                 columns=[psgc_col, 'AVG CEI'], 
                 key_on="feature.properties.unified_key", 
                 fill_color="YlGnBu",
-                fill_opacity=0.8,
-                line_opacity=0.5,
+                fill_opacity=polygon_opacity,
+                line_opacity=polygon_border_opacity,
                 legend_name="Average CEI Score",
                 missing_kwds={'color': 'lightgrey'},
                 highlight=True
@@ -540,6 +758,33 @@ with col2:
                 max_width=250
             )
             choro.geojson.add_child(popup)
+            
+            # Cell-site markers from Technology per Site / 2G / 4G / 5G / decommissioned.
+            if not filtered_sites.empty:
+                for _, row in filtered_sites.iterrows():
+                    status = str(row.get("SITE STATUS", "Active"))
+                    is_active = status.upper() == "ACTIVE"
+                    site_name = row.get(name_col, "Unknown Site") if name_col else "Unknown Site"
+                    tooltip_html = (
+                        f"<b>Site:</b> {site_name}<br>"
+                        f"<b>Status:</b> {status}<br>"
+                        f"<b>2G Sectors:</b> {row.get('2G_Sector_Count', 0)}<br>"
+                        f"<b>4G Sectors:</b> {row.get('4G_Sector_Count', 0)}<br>"
+                        f"<b>5G Sectors:</b> {row.get('5G_Sector_Count', 0)}"
+                    )
+                    if not is_active:
+                        tooltip_html += f"<br><b>Reason:</b> {row.get('REASON OF DISMANTLING', 'N/A')}"
+                    folium.Marker(
+                        location=[row[lat_col], row[lon_col]],
+                        icon=folium.Icon(
+                            color="red" if is_active else "gray",
+                            icon="signal",
+                            prefix="fa",
+                            icon_size=(16, 24),
+                            icon_anchor=(8, 24),
+                        ),
+                        tooltip=tooltip_html,
+                    ).add_to(m)
             
             # 4. Legend & Popup Styling + Layer Control Position Fix
             ui_styles = """
@@ -653,7 +898,7 @@ with col2:
                     var layerControl = L.control({ position: 'topleft' });
                     layerControl.onAdd = function(map) {
                         var div = L.DomUtil.create('div', 'leaflet-control-layer-preview');
-                        div.innerHTML = '🥞';
+                        div.innerHTML = 'ðŸ¥ž';
                         div.title = 'Hold to view original colors';
                         
                         L.DomEvent.disableClickPropagation(div);
