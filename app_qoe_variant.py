@@ -490,9 +490,26 @@ temp_df_mo = temp_df_yr.copy()
 if selected_month != "All" and 'Monthly' in temp_df_mo.columns:
     temp_df_mo = temp_df_mo[temp_df_mo['Monthly'] == selected_month]
 
+# Initialize decoupled session state keys for geographic filters
+if 'map_province' not in st.session_state: st.session_state.map_province = "All"
+if 'map_town' not in st.session_state: st.session_state.map_town = "All"
+if 'map_brgy' not in st.session_state: st.session_state.map_brgy = "All"
+
 if 'Province' in temp_df_mo.columns:
-    provinces = ["All"] + temp_df_mo['Province'].dropna().unique().tolist()
-    selected_province = st.sidebar.selectbox("PROVINCE", provinces)
+    provinces = ["All"] + sorted([str(p) for p in temp_df_mo['Province'].dropna().unique()])
+    if st.session_state.map_province not in provinces:
+        st.session_state.map_province = "All"
+    
+    # Calculate index safely and remove the 'key' binding
+    prov_idx = provinces.index(st.session_state.map_province)
+    selected_province = st.sidebar.selectbox("PROVINCE", provinces, index=prov_idx)
+    
+    # If the user manually changes the dropdown, update state and reset children
+    if selected_province != st.session_state.map_province:
+        st.session_state.map_province = selected_province
+        st.session_state.map_town = "All"
+        st.session_state.map_brgy = "All"
+        st.rerun()
 else:
     selected_province = "All"
 
@@ -501,8 +518,17 @@ if selected_province != "All" and 'Province' in temp_df_prov.columns:
     temp_df_prov = temp_df_prov[temp_df_prov['Province'] == selected_province]
 
 if 'Town' in temp_df_prov.columns:
-    towns = ["All"] + temp_df_prov['Town'].dropna().unique().tolist()
-    selected_town = st.sidebar.selectbox("TOWN", towns)
+    towns = ["All"] + sorted([str(t) for t in temp_df_prov['Town'].dropna().unique()])
+    if st.session_state.map_town not in towns:
+        st.session_state.map_town = "All"
+        
+    town_idx = towns.index(st.session_state.map_town)
+    selected_town = st.sidebar.selectbox("TOWN", towns, index=town_idx)
+    
+    if selected_town != st.session_state.map_town:
+        st.session_state.map_town = selected_town
+        st.session_state.map_brgy = "All"
+        st.rerun()
 else:
     selected_town = "All"
 
@@ -511,8 +537,16 @@ if selected_town != "All" and 'Town' in temp_df_town.columns:
     temp_df_town = temp_df_town[temp_df_town['Town'] == selected_town]
 
 if 'Brgy' in temp_df_town.columns:
-    brgys = ["All"] + temp_df_town['Brgy'].dropna().unique().tolist()
-    selected_brgy = st.sidebar.selectbox("BARANGAY", brgys)
+    brgys = ["All"] + sorted([str(b) for b in temp_df_town['Brgy'].dropna().unique()])
+    if st.session_state.map_brgy not in brgys:
+        st.session_state.map_brgy = "All"
+        
+    brgy_idx = brgys.index(st.session_state.map_brgy)
+    selected_brgy = st.sidebar.selectbox("BARANGAY", brgys, index=brgy_idx)
+    
+    if selected_brgy != st.session_state.map_brgy:
+        st.session_state.map_brgy = selected_brgy
+        st.rerun()
 else:
     selected_brgy = "All"
 
@@ -520,16 +554,37 @@ filtered_df = temp_df_town.copy()
 if selected_brgy != "All" and 'Brgy' in filtered_df.columns:
     filtered_df = filtered_df[filtered_df['Brgy'] == selected_brgy]
 
-st.sidebar.markdown("### MAP SETTINGS")
-basemap_choice = st.sidebar.selectbox(
-    "Map Layout",
-    ("OpenStreetMap (Colored)", "CartoDB Voyager", "CartoDB Positron"),
-    help="Choose the background map style."
-)
-polygon_opacity = st.sidebar.slider("Polygon Shading Opacity", 0.10, 0.90, 0.55, 0.05)
-polygon_border_opacity = st.sidebar.slider("Polygon Border Opacity", 0.10, 1.00, 0.70, 0.05)
-show_active = st.sidebar.checkbox("Show Active Sites", value=True)
-show_decom = st.sidebar.checkbox("Show Decommissioned Sites", value=False)
+st.sidebar.markdown("### DASHBOARD SETTINGS")
+
+with st.sidebar.expander("🌍 Map Styling", expanded=True):
+    basemap_choice = st.selectbox(
+        "Map Layout",
+        ("OpenStreetMap (Colored)", "CartoDB Voyager", "CartoDB Positron"),
+        index=2,
+        help="Choose the background map style."
+    )
+    polygon_opacity = st.slider("Polygon Shading Opacity", 0.10, 0.90, 0.55, 0.05)
+    polygon_border_opacity = st.slider("Polygon Border Opacity", 0.10, 1.00, 0.70, 0.05)
+
+with st.sidebar.expander("📍 Site Markers", expanded=True):
+    marker_icon_name = st.selectbox(
+        "Marker Icon Shape",
+        ["Map Pin", "Signal Bars", "WiFi", "Crosshairs", "Star"],
+        index=0,
+        help="Select the icon used to display cell sites on the map."
+    )
+    show_active = st.checkbox("Show Active Sites", value=False)
+    show_decom = st.checkbox("Show Decommissioned Sites", value=False)
+
+# Dictionary to map friendly names to FontAwesome icon codes
+fa_icon_map = {
+    "Map Pin": "map-pin",
+    "Signal Bars": "signal",
+    "WiFi": "wifi",
+    "Crosshairs": "crosshairs",
+    "Star": "star"
+}
+selected_fa_icon = fa_icon_map[marker_icon_name]
 
 if filtered_df.empty:
     st.warning("No data available for the selected filters.")
@@ -699,19 +754,25 @@ with col2:
                     )
                     if not is_active:
                         tooltip_html += f"<br><b>Reason:</b> {row.get('REASON OF DISMANTLING', 'N/A')}"
+                    marker_color = "red" if is_active else "lightgray"
+                    
                     folium.Marker(
                         location=[row[lat_col], row[lon_col]],
                         icon=folium.Icon(
-                            color="red" if is_active else "gray",
-                            icon="signal",
-                            prefix="fa",
-                            icon_size=(16, 24),
-                            icon_anchor=(8, 24),
+                            color=marker_color, 
+                            icon=selected_fa_icon, 
+                            prefix="fa"
                         ),
                         tooltip=tooltip_html,
                     ).add_to(m)
             
-            ui_styles = """<style>svg.leaflet-control.legend, .legend {background-color: rgba(255, 255, 255, 0.9) !important; border-radius: 8px !important; padding: 15px !important; box-shadow: 0 2px 6px rgba(0,0,0,0.4) !important; margin-top: 15px !important; margin-right: 15px !important;} .leaflet-control-attribution {display: none !important;} .leaflet-control-layer-preview {background: white; border: 2px solid rgba(0,0,0,0.2); border-radius: 4px; cursor: pointer; padding: 4px 7px; font-size: 16px; margin-top: 6px !important; width: 30px; height: 30px; display: flex; align-items: center; justify-content: center;}</style>"""
+            ui_styles = """<style>
+            svg.leaflet-control.legend, .legend {background-color: rgba(255, 255, 255, 0.9) !important; border-radius: 8px !important; padding: 15px !important; box-shadow: 0 2px 6px rgba(0,0,0,0.4) !important; margin-top: 15px !important; margin-right: 15px !important;}
+            .leaflet-control-attribution {display: none !important;}
+            .leaflet-control-layer-preview {background: white; border: 2px solid rgba(0,0,0,0.2); border-radius: 4px; cursor: pointer; padding: 4px 7px; font-size: 16px; margin-top: 6px !important; width: 30px; height: 30px; display: flex; align-items: center; justify-content: center;}
+            .leaflet-div-icon {background: transparent !important; border: none !important;}
+            .site-marker-icon {transform: scale(var(--site-marker-scale, 0.9)); transform-origin: center; transition: transform 0.15s ease; opacity: 0.95;}
+            </style>"""
             m.get_root().html.add_child(folium.Element(ui_styles))
             
             click_and_reset_js = """
@@ -724,68 +785,112 @@ with col2:
                         break;
                     }
                 }
+
                 if (!folium_map) return false;
+
+                function updateMarkerScale() {
+                    var zoom = folium_map.getZoom();
+                    var scale = zoom <= 4 ? 0.55 : zoom <= 6 ? 0.7 : zoom <= 8 ? 0.85 : 1.0;
+                    document.documentElement.style.setProperty('--site-marker-scale', scale);
+                }
+
+                folium_map.on('zoomend', updateMarkerScale);
+                updateMarkerScale();
+
                 var all_features = [];
                 var selected_feature = null;
+                
                 folium_map.eachLayer(function(layer) {
                     if (layer.feature && layer.setStyle) {
                         all_features.push(layer);
                         if (!layer.originalStyle) {
                             layer.originalStyle = {
-                                color: layer.options.color, fillColor: layer.options.fillColor,
-                                weight: layer.options.weight, opacity: layer.options.opacity,
+                                color: layer.options.color,
+                                fillColor: layer.options.fillColor,
+                                weight: layer.options.weight,
+                                opacity: layer.options.opacity,
                                 fillOpacity: layer.options.fillOpacity
                             };
                         }
                     }
                 });
+
                 if (all_features.length === 0) return false;
+
                 function restoreOriginalColors() {
                     all_features.forEach(function(layer) {
-                        if (layer.originalStyle) { layer.setStyle(layer.originalStyle); }
-                    });
-                }
-                function applyGrayscaleState() {
-                    all_features.forEach(function(layer) {
-                        if (selected_feature && layer === selected_feature) {
-                            layer.setStyle({fillColor: layer.originalStyle.fillColor, color: '#ff0000', weight: 4, fillOpacity: 0.9, opacity: 1});
-                        } else {
-                            layer.setStyle({fillColor: '#cccccc', color: '#d3d3d3', fillOpacity: 0.7, opacity: 0.4, weight: 1});
+                        if (layer.originalStyle) {
+                            layer.setStyle(layer.originalStyle);
                         }
                     });
                 }
+
+                function applyGrayscaleState() {
+                    all_features.forEach(function(layer) {
+                        if (selected_feature && layer === selected_feature) {
+                            layer.setStyle({
+                                fillColor: layer.originalStyle.fillColor,
+                                color: '#ff0000',
+                                weight: 4,
+                                fillOpacity: 0.9,
+                                opacity: 1
+                            });
+                        } else {
+                            layer.setStyle({
+                                fillColor: '#cccccc',
+                                color: '#d3d3d3',
+                                fillOpacity: 0.7,
+                                opacity: 0.4,
+                                weight: 1
+                            });
+                        }
+                    });
+                }
+
                 if (!folium_map._layerControlAdded) {
                     var layerControl = L.control({ position: 'topleft' });
                     layerControl.onAdd = function(map) {
                         var div = L.DomUtil.create('div', 'leaflet-control-layer-preview');
-                        div.innerHTML = '🥞';
+                        div.innerHTML = '🔘';
                         div.title = 'Hold to view original colors';
+                        
                         L.DomEvent.disableClickPropagation(div);
-                        L.DomEvent.on(div, 'mousedown touchstart', function(e) { restoreOriginalColors(); });
-                        L.DomEvent.on(div, 'mouseup mouseleave touchend', function(e) { applyGrayscaleState(); });
+
+                        L.DomEvent.on(div, 'mousedown touchstart', function(e) {
+                            restoreOriginalColors();
+                        });
+
+                        L.DomEvent.on(div, 'mouseup mouseleave touchend', function(e) {
+                            applyGrayscaleState();
+                        });
+
                         return div;
                     };
                     layerControl.addTo(folium_map);
                     folium_map._layerControlAdded = true;
                 }
-                all_features.forEach(function(layer) {
-                    layer.off('click');
-                    layer.on('click', function(e) {
-                        selected_feature = e.target;
-                        applyGrayscaleState();
-                        if (!L.Browser.ie && !L.Browser.opera && !L.Browser.edge) { e.target.bringToFront(); }
-                    });
+
+                folium_map.eachLayer(function(layer) {
+                    if (layer.feature && layer.setStyle) {
+                        layer.on('mouseover', function() {
+                            selected_feature = layer;
+                            applyGrayscaleState();
+                        });
+                        layer.on('mouseout', function() {
+                            selected_feature = null;
+                            restoreOriginalColors();
+                        });
+                    }
                 });
-                folium_map.off('click');
-                folium_map.on('click', function(e) {
-                    selected_feature = null;
-                    restoreOriginalColors();
-                });
+
                 return true;
             }
-            var checkMapExists = setInterval(function() {
-                if (bindMapInteractions()) { clearInterval(checkMapExists); }
-            }, 500);
+
+            if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', bindMapInteractions);
+            } else {
+                bindMapInteractions();
+            }
             </script>
             """
             m.get_root().html.add_child(folium.Element(click_and_reset_js))
@@ -793,7 +898,58 @@ with col2:
         else:
             st.info("No matching map boundaries found for the current data selection.")
 
-    st_folium(m, use_container_width=True, height=700, returned_objects=[])
+    # Render map and listen for clicks on the choropleth polygons
+    map_output = st_folium(
+        m, 
+        use_container_width=True, 
+        height=700, 
+        returned_objects=["last_active_drawing"]
+    )
+
+    # Process the click event
+    if map_output and map_output.get("last_active_drawing"):
+        clicked_location = map_output["last_active_drawing"]["properties"].get("Location")
+
+        if clicked_location:
+            needs_rerun = False
+            
+            # 1. Did they click a Province?
+            if 'Province' in df.columns and clicked_location in df['Province'].values:
+                if st.session_state.map_province != clicked_location:
+                    st.session_state.map_province = clicked_location
+                    st.session_state.map_town = "All"
+                    st.session_state.map_brgy = "All"
+                    needs_rerun = True
+                    
+            # 2. Did they click a Town?
+            elif 'Town' in df.columns and clicked_location in df['Town'].values:
+                if st.session_state.map_town != clicked_location:
+                    # Backfill the Province
+                    if 'Province' in df.columns:
+                        parent_province = df[df['Town'] == clicked_location]['Province'].dropna().iloc[0]
+                        st.session_state.map_province = str(parent_province)
+                    
+                    st.session_state.map_town = clicked_location
+                    st.session_state.map_brgy = "All"
+                    needs_rerun = True
+                    
+            # 3. Did they click a Barangay?
+            elif 'Brgy' in df.columns and clicked_location in df['Brgy'].values:
+                if st.session_state.map_brgy != clicked_location:
+                    # Backfill both Province and Town
+                    match_row = df[df['Brgy'] == clicked_location].iloc[0]
+                    
+                    if 'Province' in df.columns:
+                        st.session_state.map_province = str(match_row['Province'])
+                    if 'Town' in df.columns:
+                        st.session_state.map_town = str(match_row['Town'])
+                        
+                    st.session_state.map_brgy = clicked_location
+                    needs_rerun = True
+
+            # Force the dashboard to reload with the fully synchronized constraints
+            if needs_rerun:
+                st.rerun()
 
 
 # --- TABBED DATA VIEW SECTION ---
