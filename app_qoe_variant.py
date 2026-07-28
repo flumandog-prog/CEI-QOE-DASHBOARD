@@ -6,13 +6,50 @@ from streamlit_folium import st_folium
 import json
 import os
 import io
+import requests
+import streamlit.components.v1 as components
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 import plotly.express as px
 
-# --- MASTER XLSB CELL-SITE LOADER ---
+# 1. Page Configuration
+st.set_page_config(layout="wide", page_title="CEI & QOE Profiler")
+
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
-MASTER_XLSB_FILE = os.path.join(APP_DIR, "2G 3G 4G 5G Network Grouplist (AEPM) 06.15.2026.xlsb")
+
+# --- DEFINE GLOBAL STREAMLIT DECORATORS HERE ---
+@st.cache_resource
+def get_oauth_cache():
+    return {}
+
+def get_google_oauth_settings():
+    """Use Streamlit Secrets in deployment, or local credentials in development."""
+    if "google_oauth" in st.secrets:
+        oauth = st.secrets["google_oauth"]
+        required_keys = ("client_id", "client_secret")
+        missing_keys = [key for key in required_keys if not oauth.get(key)]
+        if missing_keys:
+            raise ValueError("Missing Streamlit secret value(s): " + ", ".join(missing_keys))
+
+        redirect_uri = oauth.get("redirect_uri")
+        if not redirect_uri:
+            raise ValueError("Missing Streamlit secret value: redirect_uri")
+
+        return {
+            "web": {
+                "client_id": oauth["client_id"],
+                "client_secret": oauth["client_secret"],
+                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                "token_uri": "https://oauth2.googleapis.com/token",
+            }
+        }, redirect_uri
+
+    local_secret_path = os.path.join(APP_DIR, "client_secret.json")
+    if os.path.exists(local_secret_path):
+        with open(local_secret_path, "r", encoding="utf-8") as secret_file:
+            return json.load(secret_file), "http://localhost:8501/"
+
+    return None, None
 
 def _clean_columns(dataframe):
     dataframe = dataframe.copy()
@@ -29,7 +66,6 @@ def _find_sheet(sheet_names, requested):
     return next((sheet for sheet in sheet_names if key(sheet) == wanted), None)
 
 def _network_psgc(value):
-    # Mirrors the original QOE PSGC logic below. Do not change the QOE logic.
     if pd.isna(value):
         return pd.NA
     text = str(value).strip().split('.')[0]
@@ -43,13 +79,11 @@ def _pla_id(value):
         return pd.NA
     return str(value).strip().removesuffix('.0')
 
-@st.cache_data(ttl=3600, show_spinner="Loading cell-site network data...")
-def load_master_network_file(file_path, file_modified_time):
-    """Load map coordinates and network summaries from the master XLSB workbook."""
-    if not os.path.exists(file_path):
-        raise FileNotFoundError(f"Master XLSB file not found: {file_path}")
-
-    with pd.ExcelFile(file_path, engine="pyxlsb") as workbook:
+# --- MASTER XLSB CELL-SITE LOADER (NOW BYTE-STREAM BASED) ---
+@st.cache_data(ttl=3600, show_spinner="Loading cell-site network data. This may take a moment...")
+def load_master_network_file(file_bytes):
+    """Load map coordinates and network summaries from the master XLSB raw byte stream."""
+    with pd.ExcelFile(io.BytesIO(file_bytes), engine="pyxlsb") as workbook:
         base_sheet = _find_sheet(workbook.sheet_names, "Technology per Site")
         if base_sheet is None:
             raise ValueError("Missing worksheet: Technology per Site")
@@ -58,7 +92,6 @@ def load_master_network_file(file_path, file_modified_time):
             name = str(column).strip().upper()
             return name in {"PLA ID", "SITE NAME", "SITENAME", "LATITUDE", "LONGITUDE"} or "PSGC" in name
 
-        # Every supplied network worksheet has a count/blank row before its headers.
         base = _clean_columns(pd.read_excel(
             workbook, sheet_name=base_sheet, skiprows=1, usecols=base_columns
         ))
@@ -119,8 +152,6 @@ def load_master_network_file(file_path, file_modified_time):
                 }).dropna(subset=["PLA ID"]).drop_duplicates("PLA ID")
                 base = base.merge(statuses, on="PLA ID", how="left")
 
-                # Decommissioned sites can be absent from Technology per Site.
-                # Build marker records directly from their own coordinates/PSGC fields.
                 if decom_lat is not None and decom_lon is not None:
                     decommissioned_only_sites = pd.DataFrame({
                         "PLA ID": decom[decom_pla].map(_pla_id),
@@ -153,94 +184,42 @@ def load_master_network_file(file_path, file_modified_time):
         base = pd.concat([base, decommissioned_only_sites], ignore_index=True, sort=False)
     return base.dropna(subset=[lat_col, lon_col])
 
-# 1. Page Configuration
-st.set_page_config(layout="wide", page_title="CEI & QOE Profiler")
 
-# --- DEFINE GLOBAL STREAMLIT DECORATORS HERE ---
-@st.cache_resource
-def get_oauth_cache():
-    return {}
-
-
-def get_google_oauth_settings():
-    """Use Streamlit Secrets in deployment, or local credentials in development."""
-    if "google_oauth" in st.secrets:
-        oauth = st.secrets["google_oauth"]
-        required_keys = ("client_id", "client_secret")
-        missing_keys = [key for key in required_keys if not oauth.get(key)]
-        if missing_keys:
-            raise ValueError(
-                "Missing Streamlit secret value(s): " + ", ".join(missing_keys)
-            )
-
-        redirect_uri = oauth.get("redirect_uri")
-        if not redirect_uri:
-            raise ValueError(
-                "Missing Streamlit secret value: redirect_uri"
-            )
-
-        return {
-            "web": {
-                "client_id": oauth["client_id"],
-                "client_secret": oauth["client_secret"],
-                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-                "token_uri": "https://oauth2.googleapis.com/token",
-            }
-        }, redirect_uri
-
-    local_secret_path = os.path.join(APP_DIR, "client_secret.json")
-    if os.path.exists(local_secret_path):
-        with open(local_secret_path, "r", encoding="utf-8") as secret_file:
-            return json.load(secret_file), "http://localhost:8501/"
-
-    return None, None
-
+# --- GOOGLE DRIVE PICKER MODAL ---
 @st.dialog("Browse Google Drive", width="large")
-def drive_file_picker_modal(drive_service):
-    # 1. Initialize Browser-Style History Stack
+def drive_file_picker_modal(drive_service, target="CEI"):
     if 'drive_history' not in st.session_state:
         st.session_state['drive_history'] = [('root', 'My Drive')]
         st.session_state['history_idx'] = 0
 
-    # --- STATE CALLBACK FUNCTIONS ---
-    def go_back():
-        st.session_state['history_idx'] -= 1
-
-    def go_forward():
-        st.session_state['history_idx'] += 1
-
+    def go_back(): st.session_state['history_idx'] -= 1
+    def go_forward(): st.session_state['history_idx'] += 1
     def open_folder(folder_id, folder_name):
         idx = st.session_state['history_idx']
         st.session_state['drive_history'] = st.session_state['drive_history'][:idx+1]
         st.session_state['drive_history'].append((folder_id, folder_name))
         st.session_state['history_idx'] += 1
-    # --------------------------------
 
     idx = st.session_state['history_idx']
     curr_id, curr_name = st.session_state['drive_history'][idx]
 
-    # Global Search Bar
-    search_term = st.text_input("ðŸ” Search Drive for a file:", placeholder="Type a filename...")
+    search_term = st.text_input("🔍 Search Drive for a file:", placeholder="Type a filename...")
     st.markdown("---")
 
-    # Navigation Controls
     col1, col2, col3 = st.columns([1, 1, 4])
-    with col1:
-        st.button("â¬…ï¸ Back", disabled=(idx == 0), on_click=go_back, use_container_width=True)
-    with col2:
-        st.button("âž¡ï¸ Forward", disabled=(idx == len(st.session_state['drive_history']) - 1), on_click=go_forward, use_container_width=True)
+    with col1: st.button("⬅️ Back", disabled=(idx == 0), on_click=go_back, use_container_width=True)
+    with col2: st.button("➡️ Forward", disabled=(idx == len(st.session_state['drive_history']) - 1), on_click=go_forward, use_container_width=True)
     with col3:
-        if not search_term:
-            st.caption(f"ðŸ“ **Location:** {curr_name}")
-        else:
-            st.caption("ðŸ“ **Location:** Global Search Results")
+        if not search_term: st.caption(f"📍 **Location:** {curr_name}")
+        else: st.caption("📍 **Location:** Global Search Results")
 
     st.markdown("---")
 
-    # Strict MIME types for files we can process
     valid_mimes = (
         "(mimeType='application/vnd.google-apps.spreadsheet' or "
         "mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' or "
+        "mimeType='application/vnd.ms-excel.sheet.binary.macroEnabled.12' or "
+        "name contains '.xlsb' or "
         "mimeType='text/csv')"
     )
 
@@ -251,47 +230,57 @@ def drive_file_picker_modal(drive_service):
             query = f"'{curr_id}' in parents and (mimeType='application/vnd.google-apps.folder' or {valid_mimes}) and trashed=false"
             
         results = drive_service.files().list(
-            q=query,
-            pageSize=1000,
-            fields="nextPageToken, files(id, name, mimeType)",
-            orderBy="folder, name"
+            q=query, pageSize=1000, fields="nextPageToken, files(id, name, mimeType)", orderBy="folder, name"
         ).execute()
         
         items = results.get('files', [])
-        
         folders = [item for item in items if item['mimeType'] == 'application/vnd.google-apps.folder']
         data_files = [item for item in items if item['mimeType'] != 'application/vnd.google-apps.folder']
         
         if folders and not search_term:
             st.markdown("**Folders**")
             for f in folders:
-                st.button(f"ðŸ“ {f['name']}", key=f"folder_{f['id']}", use_container_width=True, on_click=open_folder, args=(f['id'], f['name']))
+                st.button(f"📁 {f['name']}", key=f"folder_{f['id']}", use_container_width=True, on_click=open_folder, args=(f['id'], f['name']))
         
-        st.markdown("**Data Files (Sheets, Excel, CSV)**")
+        st.markdown(f"**Select {target} Data File**")
         if data_files:
             file_dict = {f['name']: f for f in data_files}
             selected_file = st.radio("Select a file:", list(file_dict.keys()), label_visibility="collapsed")
             
-            if st.button("âœ… Load Data", use_container_width=True, type="primary"):
-                st.session_state['selected_sheet_id'] = file_dict[selected_file]['id']
-                st.session_state['selected_sheet_name'] = file_dict[selected_file]['name']
-                st.session_state['selected_sheet_mime'] = file_dict[selected_file]['mimeType']
+            if st.button(f"✅ Load {target} Data", use_container_width=True, type="primary"):
+                st.session_state[f'selected_sheet_id_{target}'] = file_dict[selected_file]['id']
+                st.session_state[f'selected_sheet_name_{target}'] = file_dict[selected_file]['name']
+                st.session_state[f'selected_sheet_mime_{target}'] = file_dict[selected_file]['mimeType']
                 
                 del st.session_state['drive_history']
                 del st.session_state['history_idx']
-                
                 st.rerun()
         else:
             st.info("No supported data files found.")
             
     except Exception as e:
         st.error(f"Error reading Drive: {e}")
-# ------------------------------------------------
 
+# --- APPSHEET API DATA LOADER ---
+@st.cache_data(ttl=600)
+def load_appsheet_data(app_id, access_key, table_name):
+    url = f"https://www.appsheet.com/api/v2/apps/{app_id}/tables/{table_name}/Action"
+    headers = {"ApplicationAccessKey": access_key, "Content-Type": "application/json"}
+    payload = {"Action": "Find", "Properties": {"Locale": "en-US", "Timezone": "Asia/Manila"}, "Rows": []}
+    try:
+        response = requests.post(url, json=payload, headers=headers)
+        response.raise_for_status() 
+        data = response.json()
+        if data: return pd.DataFrame(data)
+        return pd.DataFrame()
+    except Exception as e:
+        st.error(f"Failed to connect to AppSheet API: {e}")
+        return pd.DataFrame()
+
+# --- SIDEBAR & DATA SOURCE SELECTION ---
 st.sidebar.title("QOE PROFILER TOOL")
 st.sidebar.markdown("---")
 
-# 1. State Management for the Radio Button
 if "source_selection" not in st.session_state:
     if 'code' in st.query_params or 'google_creds' in st.session_state:
         st.session_state["source_selection"] = "Connect via Google"
@@ -307,8 +296,11 @@ data_source = st.sidebar.radio(
 df = pd.DataFrame()
 
 if data_source == "Manual File Upload":
-    st.sidebar.caption("Ensure your Excel/CSV files contain a PSGC Code column. Upload up to 5 files.")
+    st.sidebar.caption("Upload your primary CEI data here.")
     uploaded_files = st.sidebar.file_uploader("Upload QOE/CEI Data (Max 5)", type=['csv', 'xlsx', 'xls'], accept_multiple_files=True)
+    
+    st.sidebar.caption("Upload your Network Grouplist to view cell sites.")
+    uploaded_net_file = st.sidebar.file_uploader("Upload Network Grouplist (XLSB)", type=['xlsb'])
     
     if uploaded_files:
         if len(uploaded_files) > 5:
@@ -327,6 +319,11 @@ if data_source == "Manual File Upload":
             
             if temp_dfs:
                 df = pd.concat(temp_dfs, ignore_index=True)
+                
+    if uploaded_net_file:
+        st.session_state['net_file_bytes'] = uploaded_net_file.getvalue()
+    else:
+        st.session_state.pop('net_file_bytes', None)
 
 elif data_source == "Connect via Google":
     st.sidebar.caption("Authenticate to browse your Google Sheets.")
@@ -346,24 +343,15 @@ elif data_source == "Connect via Google":
         oauth_config, redirect_uri = None, None
 
     if oauth_config is None:
-        st.sidebar.error(
-            "Google login is not configured. Add client_secret.json locally or "
-            "configure the google_oauth section in Streamlit Secrets after deployment."
-        )
+        st.sidebar.error("Google login is not configured.")
     else:
         try:
-            flow = Flow.from_client_config(
-                oauth_config,
-                scopes=SCOPES,
-                redirect_uri=redirect_uri
-            )
+            flow = Flow.from_client_config(oauth_config, scopes=SCOPES, redirect_uri=redirect_uri)
         except Exception as e:
             st.sidebar.error(f"Google OAuth setup failed: {e}")
             flow = None
 
         if flow is not None:
-
-            # Handle Login Flow
             if 'google_creds' not in st.session_state:
                 if 'code' not in st.query_params:
                     auth_url, state = flow.authorization_url(prompt='consent')
@@ -383,7 +371,6 @@ elif data_source == "Connect via Google":
                     except Exception as e:
                         st.sidebar.error(f"Authentication error: {e}")
             
-        # Handle the File Picker Trigger
         if 'google_creds' in st.session_state:
             creds = st.session_state['google_creds']
             try:
@@ -392,54 +379,62 @@ elif data_source == "Connect via Google":
                 
                 st.sidebar.success("Secure connection established.")
                 
-                if st.sidebar.button("ðŸ“‚ Browse Google Drive", use_container_width=True):
-                    drive_file_picker_modal(drive_service)
-                
-                # Process the data if a file was successfully selected
-                if 'selected_sheet_id' in st.session_state and 'google_df' not in st.session_state:
-                    selected_id = st.session_state['selected_sheet_id']
-                    sheet_name = st.session_state['selected_sheet_name']
-                    mime_type = st.session_state.get('selected_sheet_mime', '')
+                if st.sidebar.button("📂 Browse Drive for QOE/CEI Data", use_container_width=True):
+                    drive_file_picker_modal(drive_service, target="CEI")
                     
-                    with st.spinner(f"Downloading {sheet_name}..."):
+                if st.sidebar.button("📂 Browse Drive for Network XLSB", use_container_width=True):
+                    drive_file_picker_modal(drive_service, target="NET")
+                
+                # --- CEI Download Handling ---
+                if 'selected_sheet_id_CEI' in st.session_state and 'google_df' not in st.session_state:
+                    selected_id = st.session_state['selected_sheet_id_CEI']
+                    sheet_name = st.session_state['selected_sheet_name_CEI']
+                    mime_type = st.session_state.get('selected_sheet_mime_CEI', '')
+                    
+                    with st.spinner(f"Downloading CEI Data: {sheet_name}..."):
                         try:
-                            # ROUTE 1: Native Google Sheets
                             if mime_type == 'application/vnd.google-apps.spreadsheet':
-                                result = sheets_service.spreadsheets().values().get(
-                                    spreadsheetId=selected_id, 
-                                    range='Sheet1!A:Z'
-                                ).execute()
-                                
+                                result = sheets_service.spreadsheets().values().get(spreadsheetId=selected_id, range='Sheet1!A:Z').execute()
                                 values = result.get('values', [])
                                 if values:
                                     st.session_state['google_df'] = pd.DataFrame(values[1:], columns=values[0])
                                     st.rerun()
                                 else:
                                     st.sidebar.warning("The selected Google Sheet is empty.")
-                                    del st.session_state['selected_sheet_id']
-                            
-                            # ROUTE 2: Binary Excel or CSV Files
+                                    del st.session_state['selected_sheet_id_CEI']
                             else:
                                 request = drive_service.files().get_media(fileId=selected_id)
                                 file_content = request.execute()
-                                
                                 if mime_type == 'text/csv' or sheet_name.lower().endswith('.csv'):
                                     st.session_state['google_df'] = pd.read_csv(io.BytesIO(file_content))
                                 else:
                                     st.session_state['google_df'] = pd.read_excel(io.BytesIO(file_content))
                                 st.rerun()
-                        
                         except Exception as dl_error:
-                            st.sidebar.error(f"Download Error: Ensure 'Sheet1' exists if using Google Sheets. {dl_error}")
-                            del st.session_state['selected_sheet_id']
+                            st.sidebar.error(f"Download Error: {dl_error}")
+                            del st.session_state['selected_sheet_id_CEI']
                             
+                # --- Network XLSB Download Handling ---
+                if 'selected_sheet_id_NET' in st.session_state and 'net_file_bytes' not in st.session_state:
+                    selected_id = st.session_state['selected_sheet_id_NET']
+                    sheet_name = st.session_state['selected_sheet_name_NET']
+                    with st.spinner(f"Downloading Network File: {sheet_name}. This may take a minute..."):
+                        try:
+                            request = drive_service.files().get_media(fileId=selected_id)
+                            st.session_state['net_file_bytes'] = request.execute()
+                            st.rerun()
+                        except Exception as dl_error:
+                            st.sidebar.error(f"Network Download Error: {dl_error}")
+                            del st.session_state['selected_sheet_id_NET']
+
             except Exception as e:
                 st.sidebar.error(f"API error: {e}")
 
-    # Lock in the final data
     if 'google_df' in st.session_state:
         df = st.session_state['google_df']
-        st.sidebar.info(f"Loaded: **{st.session_state.get('selected_sheet_name', 'Google Sheet')}**")
+        st.sidebar.info(f"Loaded CEI: **{st.session_state.get('selected_sheet_name_CEI', 'Google Sheet')}**")
+    if 'net_file_bytes' in st.session_state and st.session_state.get('selected_sheet_name_NET'):
+        st.sidebar.info(f"Loaded Network: **{st.session_state['selected_sheet_name_NET']}**")
 
 # Halt execution if no data is loaded yet
 if df.empty:
@@ -454,24 +449,19 @@ if psgc_col:
         s = str(val).split('.')[0]
         if s == 'nan' or not s:
             return s
-        
         s9 = s.zfill(9)
         if len(s9) == 9:
             return s9[:2] + '0' + s9[2:]
-        
         return s9
-
     df[psgc_col] = df[psgc_col].apply(normalize_psgc)
 
 if 'Monthly' in df.columns:
     df['Parsed_Date'] = pd.to_datetime(df['Monthly'], errors='coerce')
     df['Parsed_Year'] = df['Parsed_Date'].dt.year
-# ----------------------------------------------
 
-# 4. Cascading Sidebar Controls (Hierarchical Filtering)
+# --- CASCADING SIDEBAR FILTERS ---
 st.sidebar.markdown("### FILTERS")
 
-# Filter A: Year & Month Side-by-Side
 if 'Parsed_Year' in df.columns and 'Monthly' in df.columns:
     years = ["All"] + sorted([str(int(y)) for y in df['Parsed_Year'].dropna().unique()])
     col_yr, col_mo = st.sidebar.columns(2)
@@ -483,7 +473,6 @@ else:
     with col_yr:
         st.selectbox("YEAR", ["All"])
 
-# Subset dataframe based on Year selection first
 temp_df_yr = df.copy()
 if selected_year != "All" and 'Parsed_Year' in temp_df_yr.columns:
     temp_df_yr = temp_df_yr[temp_df_yr['Parsed_Year'] == float(selected_year)]
@@ -497,12 +486,10 @@ else:
     with col_mo:
         st.selectbox("MONTH", ["All"])
 
-# Subset dataframe further based on Month selection
 temp_df_mo = temp_df_yr.copy()
 if selected_month != "All" and 'Monthly' in temp_df_mo.columns:
     temp_df_mo = temp_df_mo[temp_df_mo['Monthly'] == selected_month]
 
-# Filter B: Province
 if 'Province' in temp_df_mo.columns:
     provinces = ["All"] + temp_df_mo['Province'].dropna().unique().tolist()
     selected_province = st.sidebar.selectbox("PROVINCE", provinces)
@@ -513,7 +500,6 @@ temp_df_prov = temp_df_mo.copy()
 if selected_province != "All" and 'Province' in temp_df_prov.columns:
     temp_df_prov = temp_df_prov[temp_df_prov['Province'] == selected_province]
 
-# Filter C: Town
 if 'Town' in temp_df_prov.columns:
     towns = ["All"] + temp_df_prov['Town'].dropna().unique().tolist()
     selected_town = st.sidebar.selectbox("TOWN", towns)
@@ -524,152 +510,86 @@ temp_df_town = temp_df_prov.copy()
 if selected_town != "All" and 'Town' in temp_df_town.columns:
     temp_df_town = temp_df_town[temp_df_town['Town'] == selected_town]
 
-# Filter D: Barangay
 if 'Brgy' in temp_df_town.columns:
     brgys = ["All"] + temp_df_town['Brgy'].dropna().unique().tolist()
     selected_brgy = st.sidebar.selectbox("BARANGAY", brgys)
 else:
     selected_brgy = "All"
 
-# 5. Apply Final Cascaded Filters to Main Dataset
 filtered_df = temp_df_town.copy()
 if selected_brgy != "All" and 'Brgy' in filtered_df.columns:
     filtered_df = filtered_df[filtered_df['Brgy'] == selected_brgy]
-
-if filtered_df.empty:
-    st.warning("No data available for the selected filters.")
-    st.stop()
 
 st.sidebar.markdown("### MAP SETTINGS")
 basemap_choice = st.sidebar.selectbox(
     "Map Layout",
     ("OpenStreetMap (Colored)", "CartoDB Voyager", "CartoDB Positron"),
-    help="Choose the background map style. OpenStreetMap shows colored roads and landmarks."
+    help="Choose the background map style."
 )
-polygon_opacity = st.sidebar.slider(
-    "Polygon Shading Opacity",
-    min_value=0.10,
-    max_value=0.90,
-    value=0.55,
-    step=0.05,
-    help="Lower values make the background map and roads more visible."
-)
-polygon_border_opacity = st.sidebar.slider(
-    "Polygon Border Opacity",
-    min_value=0.10,
-    max_value=1.00,
-    value=0.70,
-    step=0.05,
-)
-show_active = st.sidebar.checkbox(
-    "Show Active Sites",
-    value=True,
-    help="Display active cell sites in red."
-)
-show_decom = st.sidebar.checkbox(
-    "Show Decommissioned Sites",
-    value=False,
-    help="Display decommissioned sites in gray."
-)
+polygon_opacity = st.sidebar.slider("Polygon Shading Opacity", 0.10, 0.90, 0.55, 0.05)
+polygon_border_opacity = st.sidebar.slider("Polygon Border Opacity", 0.10, 1.00, 0.70, 0.05)
+show_active = st.sidebar.checkbox("Show Active Sites", value=True)
+show_decom = st.sidebar.checkbox("Show Decommissioned Sites", value=False)
+
+if filtered_df.empty:
+    st.warning("No data available for the selected filters.")
+    st.stop()
 
 def get_avg(dataframe, col_name):
     if col_name in dataframe.columns:
         return dataframe[col_name].mean()
     return 0.0
 
-# --- OFFLINE GEOJSON LOADING & FILTERING ---
+# --- OFFLINE GEOJSON LOADING ---
 @st.cache_data
 def load_local_geojson(level):
     folder_name = "geojson_data"
-    
-    file_map = {
-        'brgy': 'visayas_barangays.geojson',
-        'town': 'municipalities.geojson',
-        'province': 'provinces.geojson'
-    }
-    
+    file_map = {'brgy': 'visayas_barangays.geojson', 'town': 'municipalities.geojson', 'province': 'provinces.geojson'}
     filename = file_map.get(level)
-    if not filename:
-        return None
-        
+    if not filename: return None
     base_dir = os.path.dirname(__file__)
     file_path = os.path.join(base_dir, folder_name, filename)
-    
     if os.path.exists(file_path):
         with open(file_path, 'r', encoding='utf-8') as f:
             return json.load(f)
-    else:
-        st.sidebar.error(f"Missing map file: Could not find {filename} in the {folder_name} folder.")
-        return None
+    return None
 
-if 'Brgy' in df.columns:
-    master_geo_data = load_local_geojson('brgy')
-elif 'Town' in df.columns:
-    master_geo_data = load_local_geojson('town')
-else:
-    master_geo_data = load_local_geojson('province')
-# ------------------------------------------
+if 'Brgy' in df.columns: master_geo_data = load_local_geojson('brgy')
+elif 'Town' in df.columns: master_geo_data = load_local_geojson('town')
+else: master_geo_data = load_local_geojson('province')
 
-# 6. Main Dashboard Layout
+# --- MAIN DASHBOARD LAYOUT ---
 col1, col2 = st.columns([1, 2.5]) 
 
 with col1:
     st.subheader("PERFORMANCE METRICS")
     st.caption("Averages based on current filter selection.")
-    
     st.markdown("---")
     st.markdown("**CUSTOMER EXPERIENCE INDEX (CEI)**")
-    
-    # 1. Main Overall Metric
-    st.metric(
-        label="Overall AVG CEI", 
-        value=f"{get_avg(filtered_df, 'AVG CEI'):.2f}",
-        help="**Source:** Derived directly from the 'AVG CEI' column in your dataset.\n\n**Calculation:** The arithmetic mean (average) of all overall CEI scores matching your current Year, Month, and Location filters."
-    )
+    st.metric("Overall AVG CEI", f"{get_avg(filtered_df, 'AVG CEI'):.2f}")
     
     cei_col1, cei_col2 = st.columns(2)
-    with cei_col1:
-        st.metric(
-            label="Data CEI", 
-            value=f"{get_avg(filtered_df, 'AVG Data CEI'):.2f}",
-            help="**Source:** 'AVG Data CEI' column.\n\n**Calculation:** The calculated average of data-specific customer experience index scores across the filtered selection."
-        )
-    with cei_col2:
-        st.metric(
-            label="Voice CEI", 
-            value=f"{get_avg(filtered_df, 'AVG Voice CEI'):.2f}",
-            help="**Source:** 'AVG Voice CEI' column.\n\n**Calculation:** The calculated average of voice-specific customer experience index scores across the filtered selection."
-        )
+    with cei_col1: st.metric("Data CEI", f"{get_avg(filtered_df, 'AVG Data CEI'):.2f}")
+    with cei_col2: st.metric("Voice CEI", f"{get_avg(filtered_df, 'AVG Voice CEI'):.2f}")
 
     st.markdown("---")
     st.markdown("**QUALITY OF EXPERIENCE (QoE)**")
     
     qoe_col1, qoe_col2 = st.columns(2)
     with qoe_col1:
-        st.metric(
-            label="Stream QoE", 
-            value=f"{get_avg(filtered_df, 'AVG Stream QOE'):.2f}",
-            help="**Source:** 'AVG Stream QOE' column.\n\n**Calculation:** The mean score representing the video and audio streaming quality of experience."
-        )
-        st.metric(
-            label="Web QoE", 
-            value=f"{get_avg(filtered_df, 'AVG Web QOE'):.2f}",
-            help="**Source:** 'AVG Web QOE' column.\n\n**Calculation:** The mean score representing the web browsing quality of experience."
-        )
+        st.metric("Stream QoE", f"{get_avg(filtered_df, 'AVG Stream QOE'):.2f}")
+        st.metric("Web QoE", f"{get_avg(filtered_df, 'AVG Web QOE'):.2f}")
     with qoe_col2:
-        st.metric(
-            label="Game QoE", 
-            value=f"{get_avg(filtered_df, 'AVG Game QOE'):.2f}",
-            help="**Source:** 'AVG Game QOE' column.\n\n**Calculation:** The mean score representing the mobile gaming quality of experience."
-        )
-        st.metric(
-            label="VoLTE QoE", 
-            value=f"{get_avg(filtered_df, 'AVG Volte QOE'):.2f}",
-            help="**Source:** 'AVG Volte QOE' column.\n\n**Calculation:** The mean score representing the Voice over LTE network quality of experience."
-        )
+        st.metric("Game QoE", f"{get_avg(filtered_df, 'AVG Game QOE'):.2f}")
+        st.metric("VoLTE QoE", f"{get_avg(filtered_df, 'AVG Volte QOE'):.2f}")
 
 with col2:
-    st.subheader("Geographic Profiling Map")
+    header_col, popup_col = st.columns([3, 1])
+    with header_col:
+        st.subheader("Geographic Profiling Map")
+    
+    if st.session_state.get('net_file_bytes') is None and (show_active or show_decom):
+        st.warning("⚠️ Please upload the Network Grouplist (XLSB) file in the sidebar to view cell site markers.")
 
     tile_map = {
         "OpenStreetMap (Colored)": "OpenStreetMap",
@@ -677,67 +597,19 @@ with col2:
         "CartoDB Positron": "CartoDB positron",
     }
     
-    m = folium.Map(
-        location=[12.8797, 121.7740],
-        zoom_start=6,
-        tiles=tile_map[basemap_choice],
-    )
-    
-    Fullscreen(
-        position='topleft',
-        title='Expand me',
-        title_cancel='Exit me',
-        force_separate_button=True
-    ).add_to(m)
+    m = folium.Map(location=[12.8797, 121.7740], zoom_start=6, tiles=tile_map[basemap_choice])
+    Fullscreen(position='topleft', force_separate_button=True).add_to(m)
     
     if psgc_col and master_geo_data and not filtered_df.empty:
         active_psgcs = set(filtered_df[psgc_col].tolist())
-
-        try:
-            site_coords_df = load_master_network_file(
-                MASTER_XLSB_FILE, os.path.getmtime(MASTER_XLSB_FILE)
-            )
-        except Exception as network_error:
-            st.error(f"Unable to load cell-site data: {network_error}")
-            site_coords_df = pd.DataFrame()
-
-        filtered_sites = pd.DataFrame()
-        if not site_coords_df.empty:
-            site_psgc_cols = [column for column in site_coords_df.columns if "PSGC" in column.upper()]
-            lat_col = _find_column(site_coords_df, "LATITUDE")
-            lon_col = _find_column(site_coords_df, "LONGITUDE")
-            name_col = _find_column(site_coords_df, "SITE NAME", "SITENAME")
-            if site_psgc_cols and lat_col and lon_col:
-                site_mask = pd.Series(False, index=site_coords_df.index)
-                for site_psgc_col in site_psgc_cols:
-                    site_mask = site_mask | site_coords_df[site_psgc_col].isin(active_psgcs)
-                filtered_sites = site_coords_df[site_mask].copy()
-                is_active_site = filtered_sites["SITE STATUS"].astype(str).str.upper().eq("ACTIVE")
-                if show_active and not show_decom:
-                    filtered_sites = filtered_sites[is_active_site]
-                elif show_decom and not show_active:
-                    filtered_sites = filtered_sites[~is_active_site]
-                elif not show_active and not show_decom:
-                    filtered_sites = filtered_sites.iloc[0:0]
-
-        with st.popover("📊 View Cell Site Data", use_container_width=True):
-            if filtered_sites.empty:
-                st.info("No cell-site data is available for this selection.")
-            else:
-                st.dataframe(filtered_sites, use_container_width=True, height=400)
-        
-        # Centralized calculation for overall CEI consistency
         overall_avg_cei = round(get_avg(filtered_df, 'AVG CEI'), 2)
         
         filtered_geo_features = []
         for feature in master_geo_data['features']:
             props = feature['properties']
-            
-            # 1. Try to find the exact PSGC code
             raw_psgc = props.get('psgc_code')
             psgc_match = raw_psgc in active_psgcs if raw_psgc else False
             
-            # 2. Try to find the ADM PCODE
             adm_code = (props.get('adm4_pcode') or props.get('ADM4_PCODE') or 
                         props.get('adm3_pcode') or props.get('ADM3_PCODE') or 
                         props.get('adm2_pcode') or props.get('ADM2_PCODE') or '')
@@ -751,61 +623,68 @@ with col2:
             if psgc_match or adm_match:
                 matched_key = raw_psgc if psgc_match else clean_adm
                 loc_df = filtered_df[filtered_df[psgc_col] == matched_key]
-                
-                # 3. Get Location Name
                 loc_name = (props.get('adm4_name') or props.get('ADM4_EN') or 
                             props.get('adm3_name') or props.get('ADM3_EN') or 
                             props.get('adm2_name') or props.get('ADM2_EN') or 'Unknown Location')
                 
                 feature['properties']['unified_key'] = matched_key
                 feature['properties']['Location'] = loc_name
-                
-                # --- ALIGNED OVERALL CEI (Using Mean Across Grouped Subset) ---
                 feature['properties']['Avg_CEI'] = round(loc_df['AVG CEI'].mean(), 2) if not loc_df.empty else overall_avg_cei
                 feature['properties']['Data_CEI'] = round(loc_df['AVG Data CEI'].mean(), 2) if not loc_df.empty else 0.0
                 feature['properties']['Voice_CEI'] = round(loc_df['AVG Voice CEI'].mean(), 2) if not loc_df.empty else 0.0
                 
                 filtered_geo_features.append(feature)
         
-        lightweight_geo_data = {
-            "type": "FeatureCollection",
-            "features": filtered_geo_features
-        }
-        
+        lightweight_geo_data = {"type": "FeatureCollection", "features": filtered_geo_features}
+
+        # Handle Cell Site Overlay
+        filtered_sites = pd.DataFrame()
+        if st.session_state.get('net_file_bytes') is not None:
+            try:
+                site_coords_df = load_master_network_file(st.session_state['net_file_bytes'])
+                
+                if not site_coords_df.empty:
+                    site_psgc_cols = [column for column in site_coords_df.columns if "PSGC" in column.upper()]
+                    lat_col = _find_column(site_coords_df, "LATITUDE")
+                    lon_col = _find_column(site_coords_df, "LONGITUDE")
+                    name_col = _find_column(site_coords_df, "SITE NAME", "SITENAME")
+                    
+                    if site_psgc_cols and lat_col and lon_col:
+                        site_mask = pd.Series(False, index=site_coords_df.index)
+                        for site_psgc_col in site_psgc_cols:
+                            site_mask = site_mask | site_coords_df[site_psgc_col].isin(active_psgcs)
+                        filtered_sites = site_coords_df[site_mask].copy()
+                        
+                        is_active_site = filtered_sites["SITE STATUS"].astype(str).str.upper().eq("ACTIVE")
+                        if show_active and not show_decom:
+                            filtered_sites = filtered_sites[is_active_site]
+                        elif show_decom and not show_active:
+                            filtered_sites = filtered_sites[~is_active_site]
+                        elif not show_active and not show_decom:
+                            filtered_sites = filtered_sites.iloc[0:0]
+            except Exception as network_error:
+                st.error(f"Unable to process cell-site data: {network_error}")
+
+        with popup_col:
+            with st.popover("📊 View Cell Site Data", use_container_width=True):
+                if filtered_sites.empty:
+                    st.info("No cell-site data is available for this selection.")
+                else:
+                    st.markdown("**Filtered Cell Site Data**")
+                    st.dataframe(filtered_sites, use_container_width=True, height=400)
+
         if lightweight_geo_data['features']:
-            # 1. Base Choropleth with Native Hover Highlighting
             choro = folium.Choropleth(
                 geo_data=lightweight_geo_data,
-                name="choropleth",
-                data=filtered_df,
-                columns=[psgc_col, 'AVG CEI'], 
-                key_on="feature.properties.unified_key", 
-                fill_color="YlGnBu",
-                fill_opacity=polygon_opacity,
-                line_opacity=polygon_border_opacity,
-                legend_name="Average CEI Score",
-                missing_kwds={'color': 'lightgrey'},
-                highlight=True
+                name="choropleth", data=filtered_df, columns=[psgc_col, 'AVG CEI'], 
+                key_on="feature.properties.unified_key", fill_color="YlGnBu",
+                fill_opacity=polygon_opacity, line_opacity=polygon_border_opacity, 
+                legend_name="Average CEI Score", highlight=True
             ).add_to(m)
             
-            # 2. Hover Tooltip
-            tooltip = folium.features.GeoJsonTooltip(
-                fields=['Location', 'Avg_CEI'],
-                aliases=['Location:', 'Overall CEI:'],
-                style="background-color: white; color: #333333; font-family: arial; font-size: 13px; padding: 8px; border-radius: 4px; box-shadow: 2px 2px 5px rgba(0,0,0,0.3);"
-            )
+            tooltip = folium.features.GeoJsonTooltip(fields=['Location', 'Avg_CEI'], aliases=['Location:', 'Overall CEI:'], style="background-color: white; color: #333333; font-family: arial; padding: 8px;")
             choro.geojson.add_child(tooltip)
             
-            # 3. Click Popup
-            popup = folium.features.GeoJsonPopup(
-                fields=['Location', 'Avg_CEI', 'Data_CEI', 'Voice_CEI'],
-                aliases=['Location:', 'Overall CEI:', 'Data CEI:', 'Voice CEI:'],
-                style="font-family: arial; font-size: 12px; font-weight: bold;",
-                max_width=250
-            )
-            choro.geojson.add_child(popup)
-            
-            # Cell-site markers from Technology per Site / 2G / 4G / 5G / decommissioned.
             if not filtered_sites.empty:
                 for _, row in filtered_sites.iterrows():
                     status = str(row.get("SITE STATUS", "Active"))
@@ -832,205 +711,94 @@ with col2:
                         tooltip=tooltip_html,
                     ).add_to(m)
             
-            # 4. Legend & Popup Styling + Layer Control Position Fix
-            ui_styles = """
-            <style>
-            svg.leaflet-control.legend, .legend {
-                background-color: rgba(255, 255, 255, 0.9) !important;
-                border-radius: 8px !important;
-                padding: 15px !important;
-                box-shadow: 0 2px 6px rgba(0,0,0,0.4) !important;
-                margin-top: 15px !important; 
-                margin-right: 15px !important;
-            }
-            .leaflet-popup {
-                margin-bottom: 40px !important;
-            }
-            /* Hide Leaflet Attribution Watermark */
-            .leaflet-control-attribution {
-                display: none !important;
-            }
-            /* Layer Icon positioned directly below the Fullscreen Control Icon */
-            .leaflet-control-layer-preview {
-                background: white;
-                border: 2px solid rgba(0,0,0,0.2);
-                border-radius: 4px;
-                cursor: pointer;
-                padding: 4px 7px;
-                font-size: 16px;
-                box-shadow: 0 1px 5px rgba(0,0,0,0.4);
-                text-align: center;
-                user-select: none;
-                margin-top: 6px !important; /* Stacked right under Fullscreen */
-                width: 30px;
-                height: 30px;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-            }
-            .leaflet-control-layer-preview:hover {
-                background: #f4f4f4;
-            }
-            </style>
-            """
+            ui_styles = """<style>svg.leaflet-control.legend, .legend {background-color: rgba(255, 255, 255, 0.9) !important; border-radius: 8px !important; padding: 15px !important; box-shadow: 0 2px 6px rgba(0,0,0,0.4) !important; margin-top: 15px !important; margin-right: 15px !important;} .leaflet-control-attribution {display: none !important;} .leaflet-control-layer-preview {background: white; border: 2px solid rgba(0,0,0,0.2); border-radius: 4px; cursor: pointer; padding: 4px 7px; font-size: 16px; margin-top: 6px !important; width: 30px; height: 30px; display: flex; align-items: center; justify-content: center;}</style>"""
             m.get_root().html.add_child(folium.Element(ui_styles))
             
-            # 5. Press-and-Hold Original Color Preview & Grayscale Toggle JavaScript
             click_and_reset_js = """
             <script>
             function bindMapInteractions() {
                 var folium_map = null;
-                
                 for (var key in window) {
                     if (key.startsWith("map_") && window[key] instanceof L.Map) {
                         folium_map = window[key];
                         break;
                     }
                 }
-                
                 if (!folium_map) return false;
-
                 var all_features = [];
                 var selected_feature = null;
-                
                 folium_map.eachLayer(function(layer) {
                     if (layer.feature && layer.setStyle) {
                         all_features.push(layer);
                         if (!layer.originalStyle) {
                             layer.originalStyle = {
-                                color: layer.options.color,
-                                fillColor: layer.options.fillColor,
-                                weight: layer.options.weight,
-                                opacity: layer.options.opacity,
+                                color: layer.options.color, fillColor: layer.options.fillColor,
+                                weight: layer.options.weight, opacity: layer.options.opacity,
                                 fillOpacity: layer.options.fillOpacity
                             };
                         }
                     }
                 });
-
                 if (all_features.length === 0) return false;
-
                 function restoreOriginalColors() {
                     all_features.forEach(function(layer) {
-                        if (layer.originalStyle) {
-                            layer.setStyle(layer.originalStyle);
-                        }
+                        if (layer.originalStyle) { layer.setStyle(layer.originalStyle); }
                     });
                 }
-
                 function applyGrayscaleState() {
                     all_features.forEach(function(layer) {
                         if (selected_feature && layer === selected_feature) {
-                            layer.setStyle({
-                                fillColor: layer.originalStyle.fillColor,
-                                color: '#ff0000',
-                                weight: 4,
-                                fillOpacity: 0.9,
-                                opacity: 1
-                            });
+                            layer.setStyle({fillColor: layer.originalStyle.fillColor, color: '#ff0000', weight: 4, fillOpacity: 0.9, opacity: 1});
                         } else {
-                            layer.setStyle({
-                                fillColor: '#cccccc',
-                                color: '#d3d3d3',
-                                fillOpacity: 0.7,
-                                opacity: 0.4,
-                                weight: 1
-                            });
+                            layer.setStyle({fillColor: '#cccccc', color: '#d3d3d3', fillOpacity: 0.7, opacity: 0.4, weight: 1});
                         }
                     });
                 }
-
                 if (!folium_map._layerControlAdded) {
                     var layerControl = L.control({ position: 'topleft' });
                     layerControl.onAdd = function(map) {
                         var div = L.DomUtil.create('div', 'leaflet-control-layer-preview');
-                        div.innerHTML = 'ðŸ¥ž';
+                        div.innerHTML = '🥞';
                         div.title = 'Hold to view original colors';
-                        
                         L.DomEvent.disableClickPropagation(div);
-
-                        L.DomEvent.on(div, 'mousedown touchstart', function(e) {
-                            restoreOriginalColors();
-                        });
-
-                        L.DomEvent.on(div, 'mouseup mouseleave touchend', function(e) {
-                            applyGrayscaleState();
-                        });
-
+                        L.DomEvent.on(div, 'mousedown touchstart', function(e) { restoreOriginalColors(); });
+                        L.DomEvent.on(div, 'mouseup mouseleave touchend', function(e) { applyGrayscaleState(); });
                         return div;
                     };
                     layerControl.addTo(folium_map);
                     folium_map._layerControlAdded = true;
                 }
-
                 all_features.forEach(function(layer) {
                     layer.off('click');
-                    
                     layer.on('click', function(e) {
                         selected_feature = e.target;
                         applyGrayscaleState();
-                        
-                        if (!L.Browser.ie && !L.Browser.opera && !L.Browser.edge) {
-                            e.target.bringToFront();
-                        }
+                        if (!L.Browser.ie && !L.Browser.opera && !L.Browser.edge) { e.target.bringToFront(); }
                     });
                 });
-
                 folium_map.off('click');
                 folium_map.on('click', function(e) {
                     selected_feature = null;
                     restoreOriginalColors();
                 });
-                
                 return true;
             }
-
             var checkMapExists = setInterval(function() {
-                if (bindMapInteractions()) {
-                    clearInterval(checkMapExists);
-                }
+                if (bindMapInteractions()) { clearInterval(checkMapExists); }
             }, 500);
             </script>
             """
             m.get_root().html.add_child(folium.Element(click_and_reset_js))
-            
             m.fit_bounds(m.get_bounds())
         else:
             st.info("No matching map boundaries found for the current data selection.")
-    else:
-        st.info(f"Ensure you have a PSGC column in your data and the local .geojson files are placed in the 'geojson_data' folder.")
 
     st_folium(m, use_container_width=True, height=700, returned_objects=[])
 
 
 # --- TABBED DATA VIEW SECTION ---
 st.markdown("---")
-
-tab_custom_css = """
-<style>
-div[data-baseweb="tab-list"] {
-    border-bottom: 2px solid #000000 !important;
-}
-
-button[data-baseweb="tab"] {
-    border: 2px solid #a0a0a0 !important;
-    border-radius: 8px 8px 0px 0px !important;
-    padding: 12px 24px !important;
-    margin-right: 6px !important;
-    font-weight: 900 !important;
-    font-size: 18px !important;
-    background-color: #f1f3f6 !important;
-    color: #555555 !important;
-}
-
-button[data-baseweb="tab"][aria-selected="true"] {
-    border: 2px solid #000000 !important;
-    border-bottom: 3px solid #ffffff !important;
-    background-color: #ffffff !important;
-    color: #000000 !important;
-}
-</style>
-"""
+tab_custom_css = """<style>div[data-baseweb="tab-list"] {border-bottom: 2px solid #000000 !important;} button[data-baseweb="tab"] {border: 2px solid #a0a0a0 !important; border-radius: 8px 8px 0px 0px !important; padding: 12px 24px !important; margin-right: 6px !important; font-weight: 900 !important; font-size: 18px !important; background-color: #f1f3f6 !important; color: #555555 !important;} button[data-baseweb="tab"][aria-selected="true"] {border: 2px solid #000000 !important; border-bottom: 3px solid #ffffff !important; background-color: #ffffff !important; color: #000000 !important;}</style>"""
 st.markdown(tab_custom_css, unsafe_allow_html=True)
 
 tab_chart, tab_data = st.tabs(["Performance Trend Line Chart", "Raw Data File"])
@@ -1041,25 +809,16 @@ with tab_chart:
 
     if avg_columns and time_col:
         st.markdown("**Select metrics to display on the chart:**")
-        
         cols = st.columns(min(len(avg_columns), 4))
         selected_metrics = []
-        
         for idx, col_name in enumerate(avg_columns):
-            col_target = cols[idx % len(cols)]
-            with col_target:
-                is_checked = st.checkbox(col_name, value=(idx == 0), key=f"chk_{col_name}")
-                if is_checked:
+            with cols[idx % len(cols)]:
+                if st.checkbox(col_name, value=(idx == 0), key=f"chk_{col_name}"):
                     selected_metrics.append(col_name)
         
         if selected_metrics:
             st.markdown("---")
-            agg_view = st.radio(
-                "Timeline View:", 
-                ["Monthly (Continuous)", "Year-over-Year (Overlaid Compare)"], 
-                horizontal=True
-            )
-            
+            agg_view = st.radio("Timeline View:", ["Monthly (Continuous)", "Year-over-Year (Overlaid Compare)"], horizontal=True)
             chart_data = filtered_df.copy()
             chart_data['Parsed_Date'] = pd.to_datetime(chart_data[time_col], errors='coerce')
             
@@ -1067,99 +826,30 @@ with tab_chart:
                 chart_data['Month_Num'] = chart_data['Parsed_Date'].dt.month
                 chart_data['Month'] = chart_data['Parsed_Date'].dt.strftime('%b')
                 chart_data['Year'] = chart_data['Parsed_Date'].dt.year.astype(str)
-                
                 grouped = chart_data.groupby(['Month_Num', 'Month', 'Year'])[selected_metrics].mean().reset_index()
-                
-                pivot_df = pd.pivot_table(
-                    grouped,
-                    values=selected_metrics,
-                    index=['Month_Num', 'Month'],
-                    columns=['Year']
-                )
-                
+                pivot_df = pd.pivot_table(grouped, values=selected_metrics, index=['Month_Num', 'Month'], columns=['Year'])
                 pivot_df.columns = [f"{metric} ({year})" for metric, year in pivot_df.columns]
-                pivot_df = pivot_df.sort_index(level='Month_Num')
-                pivot_df = pivot_df.reset_index(level='Month')
+                pivot_df = pivot_df.sort_index(level='Month_Num').reset_index(level='Month')
                 pivot_df.index = pivot_df['Month']
                 pivot_df.drop(columns=['Month'], inplace=True)
-                
                 pivot_df = pivot_df.round(2)
                 
-                fig = px.line(
-                    pivot_df, 
-                    markers=True,
-                    color_discrete_sequence=px.colors.qualitative.Set1,
-                    labels={"value": "Score", "variable": "Metric", "Month": "Month"} 
-                )
-                
+                fig = px.line(pivot_df, markers=True, color_discrete_sequence=px.colors.qualitative.Set1, labels={"value": "Score", "variable": "Metric", "Month": "Month"})
                 fig.update_traces(hovertemplate="%{y:.2f}")
-                
-                fig.update_layout(
-                    xaxis_title="Month",
-                    yaxis_title="Average Score",
-                    legend_title_text="Metrics by Year",
-                    hovermode="x unified",
-                    xaxis=dict(
-                        tickmode="linear", 
-                        tickangle=-45,
-                        showgrid=True,
-                        gridcolor="rgba(128, 128, 128, 0.1)",
-                        griddash="dot"
-                    ),
-                    yaxis=dict(
-                        showgrid=True,
-                        gridcolor="rgba(128, 128, 128, 0.1)",
-                        griddash="dot"
-                    ),
-                    margin=dict(l=0, r=0, t=30, b=0)
-                )
-                
+                fig.update_layout(xaxis_title="Month", yaxis_title="Average Score", hovermode="x unified", xaxis=dict(tickmode="linear", tickangle=-45, showgrid=True, gridcolor="rgba(128, 128, 128, 0.1)", griddash="dot"), yaxis=dict(showgrid=True, gridcolor="rgba(128, 128, 128, 0.1)", griddash="dot"), margin=dict(l=0, r=0, t=30, b=0))
                 st.plotly_chart(fig, use_container_width=True)
-                
             else:
                 chart_data = chart_data.groupby('Parsed_Date')[selected_metrics].mean().reset_index()
-                chart_data = chart_data.sort_values(by='Parsed_Date')
+                chart_data = chart_data.sort_values(by='Parsed_Date').round(2) 
                 
-                chart_data = chart_data.round(2) 
-                
-                fig = px.line(
-                    chart_data, 
-                    x='Parsed_Date', 
-                    y=selected_metrics,
-                    markers=True,
-                    color_discrete_sequence=px.colors.qualitative.Set1,
-                    labels={"value": "Score", "variable": "Metric", "Parsed_Date": "Month"} 
-                )
-                
+                fig = px.line(chart_data, x='Parsed_Date', y=selected_metrics, markers=True, color_discrete_sequence=px.colors.qualitative.Set1, labels={"value": "Score", "variable": "Metric", "Parsed_Date": "Month"})
                 fig.update_traces(hovertemplate="%{y:.2f}")
-                
-                fig.update_layout(
-                    xaxis_title="Timeline",
-                    yaxis_title="Average Score",
-                    legend_title_text="Metrics Overlay",
-                    hovermode="x unified",
-                    xaxis=dict(
-                        tickformat="%b %Y", 
-                        ticklabelmode="period",
-                        dtick="M1",        
-                        tickangle=-45,
-                        showgrid=True,
-                        gridcolor="rgba(128, 128, 128, 0.1)",
-                        griddash="dot"
-                    ),
-                    yaxis=dict(
-                        showgrid=True,
-                        gridcolor="rgba(128, 128, 128, 0.1)",
-                        griddash="dot"
-                    ),
-                    margin=dict(l=0, r=0, t=30, b=0)
-                )
-                
+                fig.update_layout(xaxis_title="Timeline", yaxis_title="Average Score", hovermode="x unified", xaxis=dict(tickformat="%b %Y", ticklabelmode="period", dtick="M1", tickangle=-45, showgrid=True, gridcolor="rgba(128, 128, 128, 0.1)", griddash="dot"), yaxis=dict(showgrid=True, gridcolor="rgba(128, 128, 128, 0.1)", griddash="dot"), margin=dict(l=0, r=0, t=30, b=0))
                 st.plotly_chart(fig, use_container_width=True)
         else:
             st.info("Please select at least one metric checkbox above to render the trend line chart.")
     else:
-        st.caption("Trend line chart unavailable: Missing 'Monthly' time column or numeric 'AVG' performance metrics in the dataset.")
+        st.caption("Trend line chart unavailable: Missing time or metric columns.")
                                   
 with tab_data:
     st.write("**RAW DATA VIEW:**")
