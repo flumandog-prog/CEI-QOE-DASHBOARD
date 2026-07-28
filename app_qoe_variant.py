@@ -161,6 +161,40 @@ st.set_page_config(layout="wide", page_title="CEI & QOE Profiler")
 def get_oauth_cache():
     return {}
 
+
+def get_google_oauth_settings():
+    """Use Streamlit Secrets in deployment, or local credentials in development."""
+    if "google_oauth" in st.secrets:
+        oauth = st.secrets["google_oauth"]
+        required_keys = ("client_id", "client_secret")
+        missing_keys = [key for key in required_keys if not oauth.get(key)]
+        if missing_keys:
+            raise ValueError(
+                "Missing Streamlit secret value(s): " + ", ".join(missing_keys)
+            )
+
+        redirect_uri = oauth.get("redirect_uri")
+        if not redirect_uri:
+            raise ValueError(
+                "Missing Streamlit secret value: redirect_uri"
+            )
+
+        return {
+            "web": {
+                "client_id": oauth["client_id"],
+                "client_secret": oauth["client_secret"],
+                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                "token_uri": "https://oauth2.googleapis.com/token",
+            }
+        }, redirect_uri
+
+    local_secret_path = os.path.join(APP_DIR, "client_secret.json")
+    if os.path.exists(local_secret_path):
+        with open(local_secret_path, "r", encoding="utf-8") as secret_file:
+            return json.load(secret_file), "http://localhost:8501/"
+
+    return None, None
+
 @st.dialog("Browse Google Drive", width="large")
 def drive_file_picker_modal(drive_service):
     # 1. Initialize Browser-Style History Stack
@@ -305,38 +339,50 @@ elif data_source == "Connect via Google":
     
     oauth_cache = get_oauth_cache()
     
-    if not os.path.exists('client_secret.json'):
-        st.sidebar.error("Missing client_secret.json file.")
-    else:
-        REDIRECT_URI = 'http://localhost:8501/' 
-        
-        flow = Flow.from_client_secrets_file(
-            'client_secret.json',
-            scopes=SCOPES,
-            redirect_uri=REDIRECT_URI
-        )
+    try:
+        oauth_config, redirect_uri = get_google_oauth_settings()
+    except ValueError as secret_error:
+        st.sidebar.error(f"Google OAuth configuration error: {secret_error}")
+        oauth_config, redirect_uri = None, None
 
-        # Handle Login Flow
-        if 'google_creds' not in st.session_state:
-            if 'code' not in st.query_params:
-                auth_url, state = flow.authorization_url(prompt='consent')
-                if hasattr(flow, 'code_verifier'):
-                    oauth_cache[state] = flow.code_verifier
-                st.sidebar.markdown(f"**[Login with Google]({auth_url})**")
-            else:
-                try:
-                    code = st.query_params['code']
-                    state = st.query_params.get('state')
-                    if state in oauth_cache:
-                        flow.code_verifier = oauth_cache[state]
-                        
-                    flow.fetch_token(code=code)
-                    st.session_state['google_creds'] = flow.credentials
-                    st.query_params.clear()
-                    st.rerun()
-                except Exception as e:
-                    st.sidebar.error(f"Authentication error: {e}")
-                    
+    if oauth_config is None:
+        st.sidebar.error(
+            "Google login is not configured. Add client_secret.json locally or "
+            "configure the google_oauth section in Streamlit Secrets after deployment."
+        )
+    else:
+        try:
+            flow = Flow.from_client_config(
+                oauth_config,
+                scopes=SCOPES,
+                redirect_uri=redirect_uri
+            )
+        except Exception as e:
+            st.sidebar.error(f"Google OAuth setup failed: {e}")
+            flow = None
+
+        if flow is not None:
+
+            # Handle Login Flow
+            if 'google_creds' not in st.session_state:
+                if 'code' not in st.query_params:
+                    auth_url, state = flow.authorization_url(prompt='consent')
+                    if hasattr(flow, 'code_verifier'):
+                        oauth_cache[state] = flow.code_verifier
+                    st.sidebar.markdown(f"**[Login with Google]({auth_url})**")
+                else:
+                    try:
+                        code = st.query_params['code']
+                        state = st.query_params.get('state')
+                        if state in oauth_cache:
+                            flow.code_verifier = oauth_cache[state]
+                        flow.fetch_token(code=code)
+                        st.session_state['google_creds'] = flow.credentials
+                        st.query_params.clear()
+                        st.rerun()
+                    except Exception as e:
+                        st.sidebar.error(f"Authentication error: {e}")
+            
         # Handle the File Picker Trigger
         if 'google_creds' in st.session_state:
             creds = st.session_state['google_creds']
