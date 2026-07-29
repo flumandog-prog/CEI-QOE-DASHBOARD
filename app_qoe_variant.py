@@ -15,7 +15,7 @@ st.set_page_config(layout="wide", page_title="CEI & QOE Profiler")
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# --- AUTHENTICATION GATEKEEPER ---
+# --- AUTHENTICATION GATEKEEPER WITH REGISTRATION ---
 if 'authenticated' not in st.session_state:
     st.session_state.authenticated = False
 
@@ -27,22 +27,43 @@ except Exception as e:
 
 if not st.session_state.authenticated:
     st.title("🔒 Restricted Access")
-    st.markdown("Please log in with your credentials to access the CEI & QOE Profiler Tool.")
+    st.markdown("Access to the CEI & QOE Profiler Tool is restricted.")
     
-    with st.form("login_form"):
-        email = st.text_input("Email Address")
-        password = st.text_input("Password", type="password")
-        submit = st.form_submit_button("Log In", use_container_width=True)
-        
-        if submit:
-            try:
-                response = supabase.client.auth.sign_in_with_password({"email": email, "password": password})
-                if response.user:
-                    st.session_state.authenticated = True
-                    st.rerun()
-            except Exception:
-                st.error("Invalid email or password. Please try again.")
+    auth_mode = st.radio("Select Action:", ["Log In", "Register New Account"], horizontal=True)
     
+    if auth_mode == "Log In":
+        with st.form("login_form"):
+            email = st.text_input("Email Address")
+            password = st.text_input("Password", type="password")
+            submit = st.form_submit_button("Log In", use_container_width=True)
+            
+            if submit:
+                try:
+                    response = supabase.client.auth.sign_in_with_password({"email": email, "password": password})
+                    if response.user:
+                        st.session_state.authenticated = True
+                        st.rerun()
+                except Exception:
+                    st.error("Invalid email or password. Please try again.")
+    
+    else:
+        with st.form("register_form"):
+            st.markdown("**Create a new authorized account**")
+            reg_email = st.text_input("Email Address")
+            reg_password = st.text_input("Password (Min. 6 characters)", type="password")
+            reg_submit = st.form_submit_button("Register Account", use_container_width=True)
+            
+            if reg_submit:
+                if len(reg_password) < 6:
+                    st.error("Password must be at least 6 characters long.")
+                else:
+                    try:
+                        response = supabase.client.auth.sign_up({"email": reg_email, "password": reg_password})
+                        if response.user:
+                            st.success("✅ Account created successfully! You can now log in.")
+                    except Exception as err:
+                        st.error(f"Registration failed: {err}")
+                        
     st.stop()
 
 # Check if Streamlit caught an access token in the URL after a Google redirect
