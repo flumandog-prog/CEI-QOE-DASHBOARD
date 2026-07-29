@@ -20,32 +20,49 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 if 'authenticated' not in st.session_state:
     st.session_state.authenticated = False
 
-# Initialize database connection early so the login form can use it
+# Initialize database connection early
 try:
     supabase = st.connection("supabase", type=SupabaseConnection)
 except Exception as e:
     st.error(f"Failed to connect to the cloud authentication server. Error: {e}")
     st.stop()
 
-# If the user is NOT logged in, show the login form and stop the app
+# Check if Streamlit caught an access token in the URL after a Google redirect
+query_params = st.query_params
+if "code" in query_params or "access_token" in query_params:
+    st.session_state.authenticated = True
+    # Clear the URL parameters so it looks clean
+    st.query_params.clear()
+
+# If the user is NOT logged in, show the Google login button and stop the app
 if not st.session_state.authenticated:
     st.title("🔒 Restricted Access")
-    st.markdown("Please log in to access the CEI & QOE Profiler Tool.")
+    st.markdown("Please log in with your authorized Google account to access the CEI & QOE Profiler Tool.")
     
-    with st.form("login_form"):
-        email = st.text_input("Email Address")
-        password = st.text_input("Password", type="password")
-        submit = st.form_submit_button("Log In", use_container_width=True)
+    try:
+        # Generate the secure Google OAuth URL from Supabase
+        auth_response = supabase.client.auth.sign_in_with_oauth(
+            {
+                "provider": "google",
+                "options": {
+                    "redirect_to": "https://cei-qoe-profiler.streamlit.app/"
+                }
+            }
+        )
         
-        if submit:
-            try:
-                # Attempt to authenticate with Supabase
-                response = supabase.client.auth.sign_in_with_password({"email": email, "password": password})
-                if response.user:
-                    st.session_state.authenticated = True
-                    st.rerun()
-            except Exception:
-                st.error("Invalid email or password. Please try again.")
+        # Display the login button
+        st.markdown(
+            f"""
+            <a href="{auth_response.url}" target="_self">
+                <button style="background-color:#4285F4; color:white; padding:10px 24px; border:none; border-radius:4px; cursor:pointer; font-size:16px; font-weight:bold;">
+                    Sign in with Google
+                </button>
+            </a>
+            """,
+            unsafe_allow_html=True
+        )
+    except Exception as e:
+        st.error(f"Failed to load Google Authentication: {e}")
     
     # Halt execution so the rest of the dashboard doesn't load
     st.stop()
