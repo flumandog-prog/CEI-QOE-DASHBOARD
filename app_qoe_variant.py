@@ -12,25 +12,22 @@ from st_supabase_connection import SupabaseConnection
 import streamlit as st
 from PIL import Image
 
-# 1. Load the image and set the page config FIRST
-custom_icon = Image.open("rgpm_icon.png") 
+custom_icon = Image.open("my_icon.png") 
 
 st.set_page_config(
     page_title="RGPM T6 Profiler", 
     page_icon=custom_icon
 )
 
-# 2. Place the title and icon in the main interface
-col1, col2 = st.columns([1, 15])
+# 1. Adjust column ratio to allocate more width for the icon (e.g., 1 to 6)
+col1, col2 = st.columns([1, 6])
 
 with col1:
-    st.image(custom_icon, width=45) 
+    # 2. Increase the width parameter (e.g., set to 90 instead of 45)
+    st.image(custom_icon, width=90) 
 
 with col2:
     st.markdown("# RGPM T6 Profiler")
-
-# 1. Page Configuration
-st.set_page_config(layout="centered", page_title="RGPM T6 Profiler") # Changed to centered for a better login look
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -152,6 +149,28 @@ if not st.session_state.authenticated:
     
     # Halt execution so the rest of the dashboard doesn't load
     st.stop()
+
+# --- STRICT DATA GOVERNANCE: PILOT CEI TEMPLATE VALIDATOR ---
+def validate_cei_template(dataframe):
+    """Enforces strict column headers to prevent processing errors."""
+    required_columns = [
+        "Province", "Town", "Brgy", "Monthly",
+        "AVG CEI", "AVG Data CEI", "AVG Voice CEI",
+        "AVG Stream QOE", "AVG Web QOE", "AVG Game QOE", "AVG Volte QOE"
+    ]
+    
+    missing_cols = [col for col in required_columns if col not in dataframe.columns]
+    has_psgc = any('PSGC' in str(col).upper() for col in dataframe.columns)
+    
+    if missing_cols or not has_psgc:
+        error_msg = "🚨 **DATA VALIDATION FAILED**\n\n"
+        error_msg += "The uploaded file deviates from the strict Pilot CEI format.\n\n"
+        if missing_cols:
+            error_msg += f"**Missing or Renamed Columns:**\n{', '.join(missing_cols)}\n\n"
+        if not has_psgc:
+            error_msg += "**Missing Identifier:**\nA column containing 'PSGC' is strictly required for spatial mapping.\n"
+        return False, error_msg
+    return True, ""
 
 
 def _clean_columns(dataframe):
@@ -350,6 +369,13 @@ if data_source == "Cloud Database (Default)":
                             else:
                                 st.session_state['cloud_df'] = pd.read_excel(io.BytesIO(cei_bytes))
                             
+                            # Execute Strict Data Validation
+                            is_valid, error_msg = validate_cei_template(st.session_state['cloud_df'])
+                            if not is_valid:
+                                st.sidebar.error(error_msg)
+                                del st.session_state['cloud_df'] # Drop the bad data
+                                st.stop()
+                            
                             # Download the single Network Grouplist
                             net_bytes = supabase.client.storage.from_("qoe-data").download(selected_net)
                             st.session_state['net_file_bytes'] = net_bytes
@@ -379,6 +405,14 @@ elif data_source == "Manual File Upload":
                 df = pd.read_csv(uploaded_cei_file)
             else:
                 df = pd.read_excel(uploaded_cei_file)
+                
+            # Execute Strict Data Validation
+            is_valid, error_msg = validate_cei_template(df)
+            if not is_valid:
+                st.sidebar.error(error_msg)
+                df = pd.DataFrame() # Drop the bad dataframe
+                st.stop()
+                
         except Exception as exc:
             st.sidebar.error(f"Error loading {uploaded_cei_file.name}: {exc}")
                 
