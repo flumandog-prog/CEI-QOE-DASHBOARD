@@ -184,13 +184,13 @@ def load_master_network_file(file_bytes):
         base = pd.concat([base, decommissioned_only_sites], ignore_index=True, sort=False)
     return base.dropna(subset=[lat_col, lon_col])
 
-# --- LOGGED IN VIEW ---
-# Add a logout button to the top of the sidebar
-if st.sidebar.button("🚪 Logout", use_container_width=True):
-    st.session_state.authenticated = False
-    supabase.client.auth.sign_out()
-    st.rerun()
 
+# --- LOGGED IN VIEW ---
+# Add the Globe Telecom logo to the top of the sidebar
+st.sidebar.image(
+    "https://upload.wikimedia.org/wikipedia/en/thumb/f/fa/Globe_Telecom_logo.svg/512px-Globe_Telecom_logo.svg.png", 
+    use_container_width=True
+)
 st.sidebar.markdown("---")
 
 # --- SIDEBAR & DATA SOURCE SELECTION ---
@@ -286,6 +286,13 @@ elif data_source == "Manual File Upload":
 
 # Halt execution if no data is loaded yet
 if df.empty:
+    # Render the logout button before halting if no data is present
+    st.sidebar.markdown("---")
+    if st.sidebar.button("🚪 Logout", key="logout_empty", use_container_width=True):
+        st.session_state.authenticated = False
+        supabase.client.auth.sign_out()
+        st.rerun()
+        
     st.warning("Please upload a file or connect to the database to begin profiling.")
     st.stop()
 
@@ -430,6 +437,14 @@ fa_icon_map = {
     "Star": "star"
 }
 selected_fa_icon = fa_icon_map[marker_icon_name]
+
+# --- LOGOUT BUTTON AT THE VERY BOTTOM ---
+# This renders the button at the bottom of the filters if the data loaded successfully.
+st.sidebar.markdown("---")
+if st.sidebar.button("🚪 Logout", key="logout_full", use_container_width=True):
+    st.session_state.authenticated = False
+    supabase.client.auth.sign_out()
+    st.rerun()
 
 if filtered_df.empty:
     st.warning("No data available for the selected filters.")
