@@ -11,6 +11,15 @@ import plotly.express as px
 from st_supabase_connection import SupabaseConnection
 import streamlit as st
 from PIL import Image
+import base64
+
+# Function to read your image and convert it to a format HTML can understand
+def get_base64_image(image_path):
+    with open(image_path, "rb") as img_file:
+        return base64.b64encode(img_file.read()).decode()
+
+# Convert your icon
+icon_base64 = get_base64_image("rgpm_icon.png")
 
 custom_icon = Image.open("rgpm_icon.png") 
 
@@ -19,15 +28,6 @@ st.set_page_config(
     page_icon=custom_icon
 )
 
-# 1. Adjust column ratio to allocate more width for the icon (e.g., 1 to 6)
-col1, col2 = st.columns([1, 6])
-
-with col1:
-    # 2. Increase the width parameter (e.g., set to 90 instead of 45)
-    st.image(custom_icon, width=90) 
-
-with col2:
-    st.markdown("# RGPM T6 Profiler")
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -42,7 +42,7 @@ except Exception as e:
     st.stop()
 
 if not st.session_state.authenticated:
-    # Custom CSS for a professional enterprise login screen
+   # Custom CSS for the login screen
     st.markdown("""
         <style>
             /* Center the main block and restrict width for a card-like feel */
@@ -50,6 +50,21 @@ if not st.session_state.authenticated:
                 max-width: 550px;
                 padding-top: 8vh;
             }
+            
+            /* Form Card Styling - Deep Dark Blue */
+            [data-testid="stForm"] {
+                background-color: #001b36 !important; 
+                border: 1px solid #003b73 !important; 
+                border-radius: 8px;
+                padding: 25px;
+                box-shadow: 0px 8px 16px rgba(0, 0, 0, 0.5);
+            }
+
+            /* FORCE FORM LABELS TO WHITE */
+            [data-testid="stForm"] label p {
+                color: #FFFFFF !important;
+            }
+
             /* Clean up the tabs */
             .stTabs [data-baseweb="tab-list"] {
                 gap: 24px;
@@ -64,12 +79,31 @@ if not st.session_state.authenticated:
                 padding-top: 10px;
                 padding-bottom: 10px;
             }
+            
+            /* Global Background Gradient */
+            .stApp {
+                background: linear-gradient(
+                    to bottom right, 
+                    rgba(0, 0, 139, 0.15),   
+                    rgba(153, 255, 102, 0.20) 
+                );
+                background-attachment: fixed;
+                background-size: cover;
+            }
         </style>
     """, unsafe_allow_html=True)
-    
+     
     # Official Titles
-    st.markdown("<h1 style='text-align: center; color: #0058a3;'>🌐 RGPM T6 Profiler</h1>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align: center; color: #555; font-size: 16px; margin-top: -10px;'>Globe Telecom • Territory 6 (Visayas)<br>CEI & QoE Spatial Analysis Dashboard</p>", unsafe_allow_html=True)
+    # Using flexbox to center and adding a text-shadow for the glow effect
+    st.markdown(f"""
+        <div style='display: flex; justify-content: center; align-items: center; gap: 15px; margin-bottom: 5px;'>
+            <img src='data:image/png;base64,{icon_base64}' width='75'>
+            <h1 style='margin: 0; padding: 0; text-shadow: 0px 0px 12px rgba(0, 88, 163, 0.7);'>RGPM T6 Profiler</h1>
+        </div>
+    """, unsafe_allow_html=True)
+    
+    # Your existing subtitle remains exactly the same
+    st.markdown("<p style='text-align: center; color: #555; font-size: 16px; margin-top: 0px;'>Globe Telecom • Territory 6 (Visayas)<br>CEI & QoE Spatial Analysis Dashboard</p>", unsafe_allow_html=True)
     st.markdown("---")
     
     # Clean Tab Navigation instead of Radio Buttons
@@ -77,7 +111,7 @@ if not st.session_state.authenticated:
     
     with tab1:
         with st.form("login_form"):
-            email = st.text_input("Corporate Email Address")
+            email = st.text_input("Email Address")
             password = st.text_input("Password", type="password")
             submit = st.form_submit_button("Log In", use_container_width=True)
             
