@@ -183,7 +183,7 @@ if data_source == "Cloud Database (Default)":
         # Load Network Data
         if 'net_file_bytes' not in st.session_state:
             with st.spinner("Fetching Network Data from Cloud..."):
-                net_bytes = supabase.client.storage.from_("qoe-data").download("2G_3G_4G_5G_Network_Grouplist _AEPM_061526.xlsb")
+                net_bytes = supabase.client.storage.from_("qoe-data").download("2G_3G_4G_5G_Network_Grouplist_AEPM_061526.xlsb")
                 st.session_state['net_file_bytes'] = net_bytes
                 
         st.sidebar.success("✅ Cloud data loaded securely.")
