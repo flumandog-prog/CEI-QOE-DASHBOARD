@@ -9,6 +9,25 @@ import io
 import streamlit.components.v1 as components
 import plotly.express as px
 from st_supabase_connection import SupabaseConnection
+import streamlit as st
+from PIL import Image
+
+# 1. Load the image and set the page config FIRST
+custom_icon = Image.open("rgpm_icon.png") 
+
+st.set_page_config(
+    page_title="RGPM T6 Profiler", 
+    page_icon=custom_icon
+)
+
+# 2. Place the title and icon in the main interface
+col1, col2 = st.columns([1, 15])
+
+with col1:
+    st.image(custom_icon, width=45) 
+
+with col2:
+    st.markdown("# RGPM T6 Profiler")
 
 # 1. Page Configuration
 st.set_page_config(layout="centered", page_title="RGPM T6 Profiler") # Changed to centered for a better login look
