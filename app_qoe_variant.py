@@ -11,11 +11,11 @@ import plotly.express as px
 from st_supabase_connection import SupabaseConnection
 
 # 1. Page Configuration
-st.set_page_config(layout="wide", page_title="CEI & QOE Profiler")
+st.set_page_config(layout="centered", page_title="RGPM T6 Profiler") # Changed to centered for a better login look
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# --- AUTHENTICATION GATEKEEPER WITH REGISTRATION ---
+# --- AUTHENTICATION GATEKEEPER WITH BRANDING ---
 if 'authenticated' not in st.session_state:
     st.session_state.authenticated = False
 
@@ -26,14 +26,42 @@ except Exception as e:
     st.stop()
 
 if not st.session_state.authenticated:
-    st.title("🔒 Restricted Access")
-    st.markdown("Access to the CEI & QOE Profiler Tool is restricted.")
+    # Custom CSS for a professional enterprise login screen
+    st.markdown("""
+        <style>
+            /* Center the main block and restrict width for a card-like feel */
+            .main .block-container {
+                max-width: 550px;
+                padding-top: 8vh;
+            }
+            /* Clean up the tabs */
+            .stTabs [data-baseweb="tab-list"] {
+                gap: 24px;
+                justify-content: center;
+            }
+            .stTabs [data-baseweb="tab"] {
+                height: 50px;
+                white-space: pre-wrap;
+                background-color: transparent;
+                border-radius: 4px 4px 0px 0px;
+                gap: 1px;
+                padding-top: 10px;
+                padding-bottom: 10px;
+            }
+        </style>
+    """, unsafe_allow_html=True)
     
-    auth_mode = st.radio("Select Action:", ["Log In", "Register New Account"], horizontal=True)
+    # Official Titles
+    st.markdown("<h1 style='text-align: center; color: #0058a3;'>🌐 RGPM T6 Profiler</h1>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center; color: #555; font-size: 16px; margin-top: -10px;'>Globe Telecom • Territory 6 (Visayas)<br>CEI & QoE Spatial Analysis Dashboard</p>", unsafe_allow_html=True)
+    st.markdown("---")
     
-    if auth_mode == "Log In":
+    # Clean Tab Navigation instead of Radio Buttons
+    tab1, tab2 = st.tabs(["🔒 Secure Log In", "📝 Request Access"])
+    
+    with tab1:
         with st.form("login_form"):
-            email = st.text_input("Email Address")
+            email = st.text_input("Corporate Email Address")
             password = st.text_input("Password", type="password")
             submit = st.form_submit_button("Log In", use_container_width=True)
             
@@ -46,9 +74,9 @@ if not st.session_state.authenticated:
                 except Exception:
                     st.error("Invalid email or password. Please try again.")
     
-    else:
+    with tab2:
         with st.form("register_form"):
-            st.markdown("**Create a new authorized account**")
+            st.info("New accounts require email verification before access is granted.")
             reg_email = st.text_input("Email Address")
             reg_password = st.text_input("Password (Min. 6 characters)", type="password")
             reg_submit = st.form_submit_button("Register Account", use_container_width=True)
@@ -60,12 +88,12 @@ if not st.session_state.authenticated:
                     try:
                         response = supabase.client.auth.sign_up({"email": reg_email, "password": reg_password})
                         if response.user:
-                            st.success("✅ Account created successfully! You can now log in.")
+                            st.success("✅ Registration initiated! Please check your email inbox to verify your account.")
                     except Exception as err:
                         st.error(f"Registration failed: {err}")
                         
     st.stop()
-
+    
 # Check if Streamlit caught an access token in the URL after a Google redirect
 query_params = st.query_params
 if "code" in query_params or "access_token" in query_params:
