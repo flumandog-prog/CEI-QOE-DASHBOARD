@@ -23,7 +23,7 @@ icon_base64 = get_base64_image("rgpm_icon.png")
 
 custom_icon = Image.open("rgpm_icon.png") 
 
-sst.set_page_config(
+st.set_page_config(
     page_title="RGPM T6 Profiler", 
     page_icon=custom_icon,
     layout="wide"
