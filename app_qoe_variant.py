@@ -26,6 +26,7 @@ custom_icon = Image.open("rgpm_icon.png")
 st.set_page_config(
     page_title="RGPM T6 Profiler", 
     page_icon=custom_icon
+    layout="wide"
 )
 
 
