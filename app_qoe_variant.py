@@ -161,60 +161,81 @@ data_source = st.sidebar.radio(
 df = pd.DataFrame()
 
 if data_source == "Cloud Database (Default)":
-    st.sidebar.caption("Pulling latest datasets directly from Supabase Cloud Storage.")
+    st.sidebar.caption("Browse and select datasets from Supabase Cloud Storage.")
     
     try:
         # Initialize connection from secrets.toml
         supabase = st.connection("supabase", type=SupabaseConnection)
         
-        # Load Main CEI Data (Concatenating Town and Brgy files)
-        if 'cloud_df' not in st.session_state:
-            with st.spinner("Fetching CEI Data from Cloud..."):
-                cei_town_bytes = supabase.client.storage.from_("qoe-data").download("CEI _QOE Dashboard_town_table.xlsx")
-                cei_brgy_bytes = supabase.client.storage.from_("qoe-data").download("CEI _QOE Dashboard_brgy_table.xlsx")
-                
-                df_town = pd.read_excel(io.BytesIO(cei_town_bytes))
-                df_brgy = pd.read_excel(io.BytesIO(cei_brgy_bytes))
-                
-                st.session_state['cloud_df'] = pd.concat([df_town, df_brgy], ignore_index=True)
+        # 1. Dynamically fetch the list of files in the bucket
+        bucket_files = supabase.client.storage.from_("qoe-data").list()
         
-        df = st.session_state['cloud_df']
+        # Extract just the file names, ignoring hidden system placeholders
+        available_files = [file['name'] for file in bucket_files if file['name'] != '.emptyFolderPlaceholder']
         
-        # Load Network Data
-        if 'net_file_bytes' not in st.session_state:
-            with st.spinner("Fetching Network Data from Cloud..."):
-                net_bytes = supabase.client.storage.from_("qoe-data").download("Network_Grouplist.xlsb")
-                st.session_state['net_file_bytes'] = net_bytes
-                
-        st.sidebar.success("✅ Cloud data loaded securely.")
+        if not available_files:
+            st.sidebar.warning("No files found in the 'qoe-data' bucket.")
+        else:
+            st.sidebar.markdown("**Select Cloud Files**")
+            
+            # 2. Use single-select dropdowns for both CEI and Network files to prevent map conflicts
+            selected_cei = st.sidebar.selectbox(
+                "Select QOE/CEI Data (Single File):", 
+                ["--- Select File ---"] + available_files
+            )
+            
+            selected_net = st.sidebar.selectbox(
+                "Select Network Grouplist (XLSB):", 
+                ["--- Select File ---"] + available_files
+            )
+            
+            # 3. Add a button to execute the download only when the user is ready
+            if st.sidebar.button("⬇️ Load Selected Cloud Data", use_container_width=True):
+                if selected_cei == "--- Select File ---":
+                    st.sidebar.error("Please select a CEI file.")
+                elif selected_net == "--- Select File ---":
+                    st.sidebar.error("Please select a Network Grouplist file.")
+                else:
+                    with st.spinner("Streaming selected files from Supabase..."):
+                        try:
+                            # Download the single CEI file
+                            cei_bytes = supabase.client.storage.from_("qoe-data").download(selected_cei)
+                            if selected_cei.endswith('.csv'):
+                                st.session_state['cloud_df'] = pd.read_csv(io.BytesIO(cei_bytes))
+                            else:
+                                st.session_state['cloud_df'] = pd.read_excel(io.BytesIO(cei_bytes))
+                            
+                            # Download the single Network Grouplist
+                            net_bytes = supabase.client.storage.from_("qoe-data").download(selected_net)
+                            st.session_state['net_file_bytes'] = net_bytes
+                            
+                            st.rerun()
+                        except Exception as exc:
+                            st.sidebar.error(f"Error loading files: {exc}")
         
+        # 4. If data is successfully loaded in memory, map it to the main dataframe
+        if 'cloud_df' in st.session_state and 'net_file_bytes' in st.session_state:
+            df = st.session_state['cloud_df']
+            st.sidebar.success("✅ Cloud data loaded securely.")
+            
     except Exception as e:
-        st.sidebar.error(f"Failed to load from database. Ensure the exact file names exist in the 'qoe-data' bucket. Error: {e}")
+        st.sidebar.error(f"Failed to connect to the database. Error: {e}")
 
 elif data_source == "Manual File Upload":
     st.sidebar.caption("Upload your primary CEI data here.")
-    uploaded_files = st.sidebar.file_uploader("Upload QOE/CEI Data (Max 5)", type=['csv', 'xlsx', 'xls'], accept_multiple_files=True)
+    uploaded_cei_file = st.sidebar.file_uploader("Upload QOE/CEI Data (Single File)", type=['csv', 'xlsx', 'xls'], accept_multiple_files=False)
     
     st.sidebar.caption("Upload your Network Grouplist to view cell sites.")
     uploaded_net_file = st.sidebar.file_uploader("Upload Network Grouplist (XLSB)", type=['xlsb'])
     
-    if uploaded_files:
-        if len(uploaded_files) > 5:
-            st.sidebar.error("Error: You can upload a maximum of 5 files at a time.")
-        else:
-            temp_dfs = []
-            for uploaded_file in uploaded_files:
-                try:
-                    if uploaded_file.name.endswith('.csv'):
-                        temp_df = pd.read_csv(uploaded_file)
-                    else:
-                        temp_df = pd.read_excel(uploaded_file)
-                    temp_dfs.append(temp_df)
-                except Exception as exc:
-                    st.sidebar.error(f"Error loading {uploaded_file.name}: {exc}")
-            
-            if temp_dfs:
-                df = pd.concat(temp_dfs, ignore_index=True)
+    if uploaded_cei_file:
+        try:
+            if uploaded_cei_file.name.endswith('.csv'):
+                df = pd.read_csv(uploaded_cei_file)
+            else:
+                df = pd.read_excel(uploaded_cei_file)
+        except Exception as exc:
+            st.sidebar.error(f"Error loading {uploaded_cei_file.name}: {exc}")
                 
     if uploaded_net_file:
         st.session_state['net_file_bytes'] = uploaded_net_file.getvalue()
@@ -551,6 +572,8 @@ with col2:
             svg.leaflet-control.legend, .legend {background-color: rgba(255, 255, 255, 0.9) !important; border-radius: 8px !important; padding: 15px !important; box-shadow: 0 2px 6px rgba(0,0,0,0.4) !important; margin-top: 15px !important; margin-right: 15px !important;}
             .leaflet-control-attribution {display: none !important;}
             .leaflet-control-layer-preview {background: white; border: 2px solid rgba(0,0,0,0.2); border-radius: 4px; cursor: pointer; padding: 4px 7px; font-size: 16px; margin-top: 6px !important; width: 30px; height: 30px; display: flex; align-items: center; justify-content: center;}
+            .leaflet-div-icon {background: transparent !important; border: none !important;}
+            .site-marker-icon {transform: scale(var(--site-marker-scale, 0.9)); transform-origin: center; transition: transform 0.15s ease; opacity: 0.95;}
             </style>"""
             m.get_root().html.add_child(folium.Element(ui_styles))
             
@@ -564,7 +587,17 @@ with col2:
                         break;
                     }
                 }
+
                 if (!folium_map) return false;
+
+                function updateMarkerScale() {
+                    var zoom = folium_map.getZoom();
+                    var scale = zoom <= 4 ? 0.55 : zoom <= 6 ? 0.7 : zoom <= 8 ? 0.85 : 1.0;
+                    document.documentElement.style.setProperty('--site-marker-scale', scale);
+                }
+
+                folium_map.on('zoomend', updateMarkerScale);
+                updateMarkerScale();
 
                 var all_features = [];
                 var selected_feature = null;
@@ -598,11 +631,19 @@ with col2:
                     all_features.forEach(function(layer) {
                         if (selected_feature && layer === selected_feature) {
                             layer.setStyle({
-                                fillColor: layer.originalStyle.fillColor, color: '#ff0000', weight: 4, fillOpacity: 0.9, opacity: 1
+                                fillColor: layer.originalStyle.fillColor,
+                                color: '#ff0000',
+                                weight: 4,
+                                fillOpacity: 0.9,
+                                opacity: 1
                             });
                         } else {
                             layer.setStyle({
-                                fillColor: '#cccccc', color: '#d3d3d3', fillOpacity: 0.7, opacity: 0.4, weight: 1
+                                fillColor: '#cccccc',
+                                color: '#d3d3d3',
+                                fillOpacity: 0.7,
+                                opacity: 0.4,
+                                weight: 1
                             });
                         }
                     });
@@ -614,9 +655,17 @@ with col2:
                         var div = L.DomUtil.create('div', 'leaflet-control-layer-preview');
                         div.innerHTML = '🔘';
                         div.title = 'Hold to view original colors';
+                        
                         L.DomEvent.disableClickPropagation(div);
-                        L.DomEvent.on(div, 'mousedown touchstart', function(e) { restoreOriginalColors(); });
-                        L.DomEvent.on(div, 'mouseup mouseleave touchend', function(e) { applyGrayscaleState(); });
+
+                        L.DomEvent.on(div, 'mousedown touchstart', function(e) {
+                            restoreOriginalColors();
+                        });
+
+                        L.DomEvent.on(div, 'mouseup mouseleave touchend', function(e) {
+                            applyGrayscaleState();
+                        });
+
                         return div;
                     };
                     layerControl.addTo(folium_map);
@@ -625,10 +674,17 @@ with col2:
 
                 folium_map.eachLayer(function(layer) {
                     if (layer.feature && layer.setStyle) {
-                        layer.on('mouseover', function() { selected_feature = layer; applyGrayscaleState(); });
-                        layer.on('mouseout', function() { selected_feature = null; restoreOriginalColors(); });
+                        layer.on('mouseover', function() {
+                            selected_feature = layer;
+                            applyGrayscaleState();
+                        });
+                        layer.on('mouseout', function() {
+                            selected_feature = null;
+                            restoreOriginalColors();
+                        });
                     }
                 });
+
                 return true;
             }
 
@@ -659,6 +715,7 @@ with col2:
         if clicked_location:
             needs_rerun = False
             
+            # 1. Did they click a Province?
             if 'Province' in df.columns and clicked_location in df['Province'].values:
                 if st.session_state.map_province != clicked_location:
                     st.session_state.map_province = clicked_location
@@ -666,27 +723,36 @@ with col2:
                     st.session_state.map_brgy = "All"
                     needs_rerun = True
                     
+            # 2. Did they click a Town?
             elif 'Town' in df.columns and clicked_location in df['Town'].values:
                 if st.session_state.map_town != clicked_location:
+                    # Backfill the Province
                     if 'Province' in df.columns:
                         parent_province = df[df['Town'] == clicked_location]['Province'].dropna().iloc[0]
                         st.session_state.map_province = str(parent_province)
+                    
                     st.session_state.map_town = clicked_location
                     st.session_state.map_brgy = "All"
                     needs_rerun = True
                     
+            # 3. Did they click a Barangay?
             elif 'Brgy' in df.columns and clicked_location in df['Brgy'].values:
                 if st.session_state.map_brgy != clicked_location:
+                    # Backfill both Province and Town
                     match_row = df[df['Brgy'] == clicked_location].iloc[0]
+                    
                     if 'Province' in df.columns:
                         st.session_state.map_province = str(match_row['Province'])
                     if 'Town' in df.columns:
                         st.session_state.map_town = str(match_row['Town'])
+                        
                     st.session_state.map_brgy = clicked_location
                     needs_rerun = True
 
+            # Force the dashboard to reload with the fully synchronized constraints
             if needs_rerun:
                 st.rerun()
+
 
 # --- TABBED DATA VIEW SECTION ---
 st.markdown("---")
