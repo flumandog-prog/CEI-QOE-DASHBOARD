@@ -216,6 +216,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+.streamlit/secrets.toml
 
 # Local Google API credentials and temporary artifacts
 client_secret.json

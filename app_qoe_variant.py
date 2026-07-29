@@ -6,50 +6,14 @@ from streamlit_folium import st_folium
 import json
 import os
 import io
-import requests
 import streamlit.components.v1 as components
-from google_auth_oauthlib.flow import Flow
-from googleapiclient.discovery import build
 import plotly.express as px
+from st_supabase_connection import SupabaseConnection
 
 # 1. Page Configuration
 st.set_page_config(layout="wide", page_title="CEI & QOE Profiler")
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
-
-# --- DEFINE GLOBAL STREAMLIT DECORATORS HERE ---
-@st.cache_resource
-def get_oauth_cache():
-    return {}
-
-def get_google_oauth_settings():
-    """Use Streamlit Secrets in deployment, or local credentials in development."""
-    if "google_oauth" in st.secrets:
-        oauth = st.secrets["google_oauth"]
-        required_keys = ("client_id", "client_secret")
-        missing_keys = [key for key in required_keys if not oauth.get(key)]
-        if missing_keys:
-            raise ValueError("Missing Streamlit secret value(s): " + ", ".join(missing_keys))
-
-        redirect_uri = oauth.get("redirect_uri")
-        if not redirect_uri:
-            raise ValueError("Missing Streamlit secret value: redirect_uri")
-
-        return {
-            "web": {
-                "client_id": oauth["client_id"],
-                "client_secret": oauth["client_secret"],
-                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-                "token_uri": "https://oauth2.googleapis.com/token",
-            }
-        }, redirect_uri
-
-    local_secret_path = os.path.join(APP_DIR, "client_secret.json")
-    if os.path.exists(local_secret_path):
-        with open(local_secret_path, "r", encoding="utf-8") as secret_file:
-            return json.load(secret_file), "http://localhost:8501/"
-
-    return None, None
 
 def _clean_columns(dataframe):
     dataframe = dataframe.copy()
@@ -79,7 +43,7 @@ def _pla_id(value):
         return pd.NA
     return str(value).strip().removesuffix('.0')
 
-# --- MASTER XLSB CELL-SITE LOADER (NOW BYTE-STREAM BASED) ---
+# --- MASTER XLSB CELL-SITE LOADER (BYTE-STREAM BASED) ---
 @st.cache_data(ttl=3600, show_spinner="Loading cell-site network data. This may take a moment...")
 def load_master_network_file(file_bytes):
     """Load map coordinates and network summaries from the master XLSB raw byte stream."""
@@ -184,118 +148,50 @@ def load_master_network_file(file_bytes):
         base = pd.concat([base, decommissioned_only_sites], ignore_index=True, sort=False)
     return base.dropna(subset=[lat_col, lon_col])
 
-
-# --- GOOGLE DRIVE PICKER MODAL ---
-@st.dialog("Browse Google Drive", width="large")
-def drive_file_picker_modal(drive_service, target="CEI"):
-    if 'drive_history' not in st.session_state:
-        st.session_state['drive_history'] = [('root', 'My Drive')]
-        st.session_state['history_idx'] = 0
-
-    def go_back(): st.session_state['history_idx'] -= 1
-    def go_forward(): st.session_state['history_idx'] += 1
-    def open_folder(folder_id, folder_name):
-        idx = st.session_state['history_idx']
-        st.session_state['drive_history'] = st.session_state['drive_history'][:idx+1]
-        st.session_state['drive_history'].append((folder_id, folder_name))
-        st.session_state['history_idx'] += 1
-
-    idx = st.session_state['history_idx']
-    curr_id, curr_name = st.session_state['drive_history'][idx]
-
-    search_term = st.text_input("🔍 Search Drive for a file:", placeholder="Type a filename...")
-    st.markdown("---")
-
-    col1, col2, col3 = st.columns([1, 1, 4])
-    with col1: st.button("⬅️ Back", disabled=(idx == 0), on_click=go_back, use_container_width=True)
-    with col2: st.button("➡️ Forward", disabled=(idx == len(st.session_state['drive_history']) - 1), on_click=go_forward, use_container_width=True)
-    with col3:
-        if not search_term: st.caption(f"📍 **Location:** {curr_name}")
-        else: st.caption("📍 **Location:** Global Search Results")
-
-    st.markdown("---")
-
-    valid_mimes = (
-        "(mimeType='application/vnd.google-apps.spreadsheet' or "
-        "mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' or "
-        "mimeType='application/vnd.ms-excel.sheet.binary.macroEnabled.12' or "
-        "name contains '.xlsb' or "
-        "mimeType='text/csv')"
-    )
-
-    try:
-        if search_term:
-            query = f"name contains '{search_term}' and {valid_mimes} and trashed=false"
-        else:
-            query = f"'{curr_id}' in parents and (mimeType='application/vnd.google-apps.folder' or {valid_mimes}) and trashed=false"
-            
-        results = drive_service.files().list(
-            q=query, pageSize=1000, fields="nextPageToken, files(id, name, mimeType)", orderBy="folder, name"
-        ).execute()
-        
-        items = results.get('files', [])
-        folders = [item for item in items if item['mimeType'] == 'application/vnd.google-apps.folder']
-        data_files = [item for item in items if item['mimeType'] != 'application/vnd.google-apps.folder']
-        
-        if folders and not search_term:
-            st.markdown("**Folders**")
-            for f in folders:
-                st.button(f"📁 {f['name']}", key=f"folder_{f['id']}", use_container_width=True, on_click=open_folder, args=(f['id'], f['name']))
-        
-        st.markdown(f"**Select {target} Data File**")
-        if data_files:
-            file_dict = {f['name']: f for f in data_files}
-            selected_file = st.radio("Select a file:", list(file_dict.keys()), label_visibility="collapsed")
-            
-            if st.button(f"✅ Load {target} Data", use_container_width=True, type="primary"):
-                st.session_state[f'selected_sheet_id_{target}'] = file_dict[selected_file]['id']
-                st.session_state[f'selected_sheet_name_{target}'] = file_dict[selected_file]['name']
-                st.session_state[f'selected_sheet_mime_{target}'] = file_dict[selected_file]['mimeType']
-                
-                del st.session_state['drive_history']
-                del st.session_state['history_idx']
-                st.rerun()
-        else:
-            st.info("No supported data files found.")
-            
-    except Exception as e:
-        st.error(f"Error reading Drive: {e}")
-
-# --- APPSHEET API DATA LOADER ---
-@st.cache_data(ttl=600)
-def load_appsheet_data(app_id, access_key, table_name):
-    url = f"https://www.appsheet.com/api/v2/apps/{app_id}/tables/{table_name}/Action"
-    headers = {"ApplicationAccessKey": access_key, "Content-Type": "application/json"}
-    payload = {"Action": "Find", "Properties": {"Locale": "en-US", "Timezone": "Asia/Manila"}, "Rows": []}
-    try:
-        response = requests.post(url, json=payload, headers=headers)
-        response.raise_for_status() 
-        data = response.json()
-        if data: return pd.DataFrame(data)
-        return pd.DataFrame()
-    except Exception as e:
-        st.error(f"Failed to connect to AppSheet API: {e}")
-        return pd.DataFrame()
-
 # --- SIDEBAR & DATA SOURCE SELECTION ---
 st.sidebar.title("QOE PROFILER TOOL")
 st.sidebar.markdown("---")
 
-if "source_selection" not in st.session_state:
-    if 'code' in st.query_params or 'google_creds' in st.session_state:
-        st.session_state["source_selection"] = "Connect via Google"
-    else:
-        st.session_state["source_selection"] = "Manual File Upload"
-
 data_source = st.sidebar.radio(
     "Select Data Source:",
-    ("Manual File Upload", "Connect via Google"),
-    key="source_selection" 
+    ("Cloud Database (Default)", "Manual File Upload"),
+    index=0 
 )
 
 df = pd.DataFrame()
 
-if data_source == "Manual File Upload":
+if data_source == "Cloud Database (Default)":
+    st.sidebar.caption("Pulling latest datasets directly from Supabase Cloud Storage.")
+    
+    try:
+        # Initialize connection from secrets.toml
+        supabase = st.connection("supabase", type=SupabaseConnection)
+        
+        # Load Main CEI Data (Concatenating Town and Brgy files)
+        if 'cloud_df' not in st.session_state:
+            with st.spinner("Fetching CEI Data from Cloud..."):
+                cei_town_bytes = supabase.client.storage.from_("qoe-data").download("CEI_QOE_Dashboard_CEI Data_Extraction_(Town)_Table.xlsx")
+                cei_brgy_bytes = supabase.client.storage.from_("qoe-data").download("CEI_QOE_Dashboard_CEI Data_Extraction_(Brgy)_Table.xlsx")
+                
+                df_town = pd.read_excel(io.BytesIO(cei_town_bytes))
+                df_brgy = pd.read_excel(io.BytesIO(cei_brgy_bytes))
+                
+                st.session_state['cloud_df'] = pd.concat([df_town, df_brgy], ignore_index=True)
+        
+        df = st.session_state['cloud_df']
+        
+        # Load Network Data
+        if 'net_file_bytes' not in st.session_state:
+            with st.spinner("Fetching Network Data from Cloud..."):
+                net_bytes = supabase.client.storage.from_("qoe-data").download("2G_3G_4G_5G_Network_Grouplist _AEPM_061526.xlsb")
+                st.session_state['net_file_bytes'] = net_bytes
+                
+        st.sidebar.success("✅ Cloud data loaded securely.")
+        
+    except Exception as e:
+        st.sidebar.error(f"Failed to load from database. Ensure the exact file names exist in the 'qoe-data' bucket. Error: {e}")
+
+elif data_source == "Manual File Upload":
     st.sidebar.caption("Upload your primary CEI data here.")
     uploaded_files = st.sidebar.file_uploader("Upload QOE/CEI Data (Max 5)", type=['csv', 'xlsx', 'xls'], accept_multiple_files=True)
     
@@ -325,120 +221,9 @@ if data_source == "Manual File Upload":
     else:
         st.session_state.pop('net_file_bytes', None)
 
-elif data_source == "Connect via Google":
-    st.sidebar.caption("Authenticate to browse your Google Sheets.")
-    
-    SCOPES = [
-        'https://www.googleapis.com/auth/spreadsheets.readonly',
-        'https://www.googleapis.com/auth/drive.metadata.readonly',
-        'https://www.googleapis.com/auth/drive.readonly' 
-    ]
-    
-    oauth_cache = get_oauth_cache()
-    
-    try:
-        oauth_config, redirect_uri = get_google_oauth_settings()
-    except ValueError as secret_error:
-        st.sidebar.error(f"Google OAuth configuration error: {secret_error}")
-        oauth_config, redirect_uri = None, None
-
-    if oauth_config is None:
-        st.sidebar.error("Google login is not configured.")
-    else:
-        try:
-            flow = Flow.from_client_config(oauth_config, scopes=SCOPES, redirect_uri=redirect_uri)
-        except Exception as e:
-            st.sidebar.error(f"Google OAuth setup failed: {e}")
-            flow = None
-
-        if flow is not None:
-            if 'google_creds' not in st.session_state:
-                if 'code' not in st.query_params:
-                    auth_url, state = flow.authorization_url(prompt='consent')
-                    if hasattr(flow, 'code_verifier'):
-                        oauth_cache[state] = flow.code_verifier
-                    st.sidebar.markdown(f"**[Login with Google]({auth_url})**")
-                else:
-                    try:
-                        code = st.query_params['code']
-                        state = st.query_params.get('state')
-                        if state in oauth_cache:
-                            flow.code_verifier = oauth_cache[state]
-                        flow.fetch_token(code=code)
-                        st.session_state['google_creds'] = flow.credentials
-                        st.query_params.clear()
-                        st.rerun()
-                    except Exception as e:
-                        st.sidebar.error(f"Authentication error: {e}")
-            
-        if 'google_creds' in st.session_state:
-            creds = st.session_state['google_creds']
-            try:
-                drive_service = build('drive', 'v3', credentials=creds)
-                sheets_service = build('sheets', 'v4', credentials=creds)
-                
-                st.sidebar.success("Secure connection established.")
-                
-                if st.sidebar.button("📂 Browse Drive for QOE/CEI Data", use_container_width=True):
-                    drive_file_picker_modal(drive_service, target="CEI")
-                    
-                if st.sidebar.button("📂 Browse Drive for Network XLSB", use_container_width=True):
-                    drive_file_picker_modal(drive_service, target="NET")
-                
-                # --- CEI Download Handling ---
-                if 'selected_sheet_id_CEI' in st.session_state and 'google_df' not in st.session_state:
-                    selected_id = st.session_state['selected_sheet_id_CEI']
-                    sheet_name = st.session_state['selected_sheet_name_CEI']
-                    mime_type = st.session_state.get('selected_sheet_mime_CEI', '')
-                    
-                    with st.spinner(f"Downloading CEI Data: {sheet_name}..."):
-                        try:
-                            if mime_type == 'application/vnd.google-apps.spreadsheet':
-                                result = sheets_service.spreadsheets().values().get(spreadsheetId=selected_id, range='Sheet1!A:Z').execute()
-                                values = result.get('values', [])
-                                if values:
-                                    st.session_state['google_df'] = pd.DataFrame(values[1:], columns=values[0])
-                                    st.rerun()
-                                else:
-                                    st.sidebar.warning("The selected Google Sheet is empty.")
-                                    del st.session_state['selected_sheet_id_CEI']
-                            else:
-                                request = drive_service.files().get_media(fileId=selected_id)
-                                file_content = request.execute()
-                                if mime_type == 'text/csv' or sheet_name.lower().endswith('.csv'):
-                                    st.session_state['google_df'] = pd.read_csv(io.BytesIO(file_content))
-                                else:
-                                    st.session_state['google_df'] = pd.read_excel(io.BytesIO(file_content))
-                                st.rerun()
-                        except Exception as dl_error:
-                            st.sidebar.error(f"Download Error: {dl_error}")
-                            del st.session_state['selected_sheet_id_CEI']
-                            
-                # --- Network XLSB Download Handling ---
-                if 'selected_sheet_id_NET' in st.session_state and 'net_file_bytes' not in st.session_state:
-                    selected_id = st.session_state['selected_sheet_id_NET']
-                    sheet_name = st.session_state['selected_sheet_name_NET']
-                    with st.spinner(f"Downloading Network File: {sheet_name}. This may take a minute..."):
-                        try:
-                            request = drive_service.files().get_media(fileId=selected_id)
-                            st.session_state['net_file_bytes'] = request.execute()
-                            st.rerun()
-                        except Exception as dl_error:
-                            st.sidebar.error(f"Network Download Error: {dl_error}")
-                            del st.session_state['selected_sheet_id_NET']
-
-            except Exception as e:
-                st.sidebar.error(f"API error: {e}")
-
-    if 'google_df' in st.session_state:
-        df = st.session_state['google_df']
-        st.sidebar.info(f"Loaded CEI: **{st.session_state.get('selected_sheet_name_CEI', 'Google Sheet')}**")
-    if 'net_file_bytes' in st.session_state and st.session_state.get('selected_sheet_name_NET'):
-        st.sidebar.info(f"Loaded Network: **{st.session_state['selected_sheet_name_NET']}**")
-
 # Halt execution if no data is loaded yet
 if df.empty:
-    st.warning("Please upload a file or authenticate via Google to begin profiling.")
+    st.warning("Please upload a file or connect to the database to begin profiling.")
     st.stop()
 
 # --- CRITICAL PSGC CLEANING & YEAR PARSING ---
@@ -500,11 +285,9 @@ if 'Province' in temp_df_mo.columns:
     if st.session_state.map_province not in provinces:
         st.session_state.map_province = "All"
     
-    # Calculate index safely and remove the 'key' binding
     prov_idx = provinces.index(st.session_state.map_province)
     selected_province = st.sidebar.selectbox("PROVINCE", provinces, index=prov_idx)
     
-    # If the user manually changes the dropdown, update state and reset children
     if selected_province != st.session_state.map_province:
         st.session_state.map_province = selected_province
         st.session_state.map_town = "All"
@@ -576,7 +359,6 @@ with st.sidebar.expander("📍 Site Markers", expanded=True):
     show_active = st.checkbox("Show Active Sites", value=False)
     show_decom = st.checkbox("Show Decommissioned Sites", value=False)
 
-# Dictionary to map friendly names to FontAwesome icon codes
 fa_icon_map = {
     "Map Pin": "map-pin",
     "Signal Bars": "signal",
@@ -692,7 +474,6 @@ with col2:
         
         lightweight_geo_data = {"type": "FeatureCollection", "features": filtered_geo_features}
 
-        # Handle Cell Site Overlay
         filtered_sites = pd.DataFrame()
         if st.session_state.get('net_file_bytes') is not None:
             try:
@@ -770,8 +551,6 @@ with col2:
             svg.leaflet-control.legend, .legend {background-color: rgba(255, 255, 255, 0.9) !important; border-radius: 8px !important; padding: 15px !important; box-shadow: 0 2px 6px rgba(0,0,0,0.4) !important; margin-top: 15px !important; margin-right: 15px !important;}
             .leaflet-control-attribution {display: none !important;}
             .leaflet-control-layer-preview {background: white; border: 2px solid rgba(0,0,0,0.2); border-radius: 4px; cursor: pointer; padding: 4px 7px; font-size: 16px; margin-top: 6px !important; width: 30px; height: 30px; display: flex; align-items: center; justify-content: center;}
-            .leaflet-div-icon {background: transparent !important; border: none !important;}
-            .site-marker-icon {transform: scale(var(--site-marker-scale, 0.9)); transform-origin: center; transition: transform 0.15s ease; opacity: 0.95;}
             </style>"""
             m.get_root().html.add_child(folium.Element(ui_styles))
             
@@ -785,17 +564,7 @@ with col2:
                         break;
                     }
                 }
-
                 if (!folium_map) return false;
-
-                function updateMarkerScale() {
-                    var zoom = folium_map.getZoom();
-                    var scale = zoom <= 4 ? 0.55 : zoom <= 6 ? 0.7 : zoom <= 8 ? 0.85 : 1.0;
-                    document.documentElement.style.setProperty('--site-marker-scale', scale);
-                }
-
-                folium_map.on('zoomend', updateMarkerScale);
-                updateMarkerScale();
 
                 var all_features = [];
                 var selected_feature = null;
@@ -829,19 +598,11 @@ with col2:
                     all_features.forEach(function(layer) {
                         if (selected_feature && layer === selected_feature) {
                             layer.setStyle({
-                                fillColor: layer.originalStyle.fillColor,
-                                color: '#ff0000',
-                                weight: 4,
-                                fillOpacity: 0.9,
-                                opacity: 1
+                                fillColor: layer.originalStyle.fillColor, color: '#ff0000', weight: 4, fillOpacity: 0.9, opacity: 1
                             });
                         } else {
                             layer.setStyle({
-                                fillColor: '#cccccc',
-                                color: '#d3d3d3',
-                                fillOpacity: 0.7,
-                                opacity: 0.4,
-                                weight: 1
+                                fillColor: '#cccccc', color: '#d3d3d3', fillOpacity: 0.7, opacity: 0.4, weight: 1
                             });
                         }
                     });
@@ -853,17 +614,9 @@ with col2:
                         var div = L.DomUtil.create('div', 'leaflet-control-layer-preview');
                         div.innerHTML = '🔘';
                         div.title = 'Hold to view original colors';
-                        
                         L.DomEvent.disableClickPropagation(div);
-
-                        L.DomEvent.on(div, 'mousedown touchstart', function(e) {
-                            restoreOriginalColors();
-                        });
-
-                        L.DomEvent.on(div, 'mouseup mouseleave touchend', function(e) {
-                            applyGrayscaleState();
-                        });
-
+                        L.DomEvent.on(div, 'mousedown touchstart', function(e) { restoreOriginalColors(); });
+                        L.DomEvent.on(div, 'mouseup mouseleave touchend', function(e) { applyGrayscaleState(); });
                         return div;
                     };
                     layerControl.addTo(folium_map);
@@ -872,17 +625,10 @@ with col2:
 
                 folium_map.eachLayer(function(layer) {
                     if (layer.feature && layer.setStyle) {
-                        layer.on('mouseover', function() {
-                            selected_feature = layer;
-                            applyGrayscaleState();
-                        });
-                        layer.on('mouseout', function() {
-                            selected_feature = null;
-                            restoreOriginalColors();
-                        });
+                        layer.on('mouseover', function() { selected_feature = layer; applyGrayscaleState(); });
+                        layer.on('mouseout', function() { selected_feature = null; restoreOriginalColors(); });
                     }
                 });
-
                 return true;
             }
 
@@ -913,7 +659,6 @@ with col2:
         if clicked_location:
             needs_rerun = False
             
-            # 1. Did they click a Province?
             if 'Province' in df.columns and clicked_location in df['Province'].values:
                 if st.session_state.map_province != clicked_location:
                     st.session_state.map_province = clicked_location
@@ -921,36 +666,27 @@ with col2:
                     st.session_state.map_brgy = "All"
                     needs_rerun = True
                     
-            # 2. Did they click a Town?
             elif 'Town' in df.columns and clicked_location in df['Town'].values:
                 if st.session_state.map_town != clicked_location:
-                    # Backfill the Province
                     if 'Province' in df.columns:
                         parent_province = df[df['Town'] == clicked_location]['Province'].dropna().iloc[0]
                         st.session_state.map_province = str(parent_province)
-                    
                     st.session_state.map_town = clicked_location
                     st.session_state.map_brgy = "All"
                     needs_rerun = True
                     
-            # 3. Did they click a Barangay?
             elif 'Brgy' in df.columns and clicked_location in df['Brgy'].values:
                 if st.session_state.map_brgy != clicked_location:
-                    # Backfill both Province and Town
                     match_row = df[df['Brgy'] == clicked_location].iloc[0]
-                    
                     if 'Province' in df.columns:
                         st.session_state.map_province = str(match_row['Province'])
                     if 'Town' in df.columns:
                         st.session_state.map_town = str(match_row['Town'])
-                        
                     st.session_state.map_brgy = clicked_location
                     needs_rerun = True
 
-            # Force the dashboard to reload with the fully synchronized constraints
             if needs_rerun:
                 st.rerun()
-
 
 # --- TABBED DATA VIEW SECTION ---
 st.markdown("---")
