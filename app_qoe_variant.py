@@ -15,6 +15,42 @@ st.set_page_config(layout="wide", page_title="CEI & QOE Profiler")
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
+# --- AUTHENTICATION GATEKEEPER ---
+# Initialize session state for login status
+if 'authenticated' not in st.session_state:
+    st.session_state.authenticated = False
+
+# Initialize database connection early so the login form can use it
+try:
+    supabase = st.connection("supabase", type=SupabaseConnection)
+except Exception as e:
+    st.error(f"Failed to connect to the cloud authentication server. Error: {e}")
+    st.stop()
+
+# If the user is NOT logged in, show the login form and stop the app
+if not st.session_state.authenticated:
+    st.title("🔒 Restricted Access")
+    st.markdown("Please log in to access the CEI & QOE Profiler Tool.")
+    
+    with st.form("login_form"):
+        email = st.text_input("Email Address")
+        password = st.text_input("Password", type="password")
+        submit = st.form_submit_button("Log In", use_container_width=True)
+        
+        if submit:
+            try:
+                # Attempt to authenticate with Supabase
+                response = supabase.client.auth.sign_in_with_password({"email": email, "password": password})
+                if response.user:
+                    st.session_state.authenticated = True
+                    st.rerun()
+            except Exception:
+                st.error("Invalid email or password. Please try again.")
+    
+    # Halt execution so the rest of the dashboard doesn't load
+    st.stop()
+
+
 def _clean_columns(dataframe):
     dataframe = dataframe.copy()
     dataframe.columns = [str(column).strip() for column in dataframe.columns]
@@ -148,6 +184,15 @@ def load_master_network_file(file_bytes):
         base = pd.concat([base, decommissioned_only_sites], ignore_index=True, sort=False)
     return base.dropna(subset=[lat_col, lon_col])
 
+# --- LOGGED IN VIEW ---
+# Add a logout button to the top of the sidebar
+if st.sidebar.button("🚪 Logout", use_container_width=True):
+    st.session_state.authenticated = False
+    supabase.client.auth.sign_out()
+    st.rerun()
+
+st.sidebar.markdown("---")
+
 # --- SIDEBAR & DATA SOURCE SELECTION ---
 st.sidebar.title("QOE PROFILER TOOL")
 st.sidebar.markdown("---")
@@ -164,9 +209,6 @@ if data_source == "Cloud Database (Default)":
     st.sidebar.caption("Browse and select datasets from Supabase Cloud Storage.")
     
     try:
-        # Initialize connection from secrets.toml
-        supabase = st.connection("supabase", type=SupabaseConnection)
-        
         # 1. Dynamically fetch the list of files in the bucket
         bucket_files = supabase.client.storage.from_("qoe-data").list()
         
