@@ -16,15 +16,33 @@ st.set_page_config(layout="wide", page_title="CEI & QOE Profiler")
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # --- AUTHENTICATION GATEKEEPER ---
-# Initialize session state for login status
 if 'authenticated' not in st.session_state:
     st.session_state.authenticated = False
 
-# Initialize database connection early
 try:
     supabase = st.connection("supabase", type=SupabaseConnection)
 except Exception as e:
     st.error(f"Failed to connect to the cloud authentication server. Error: {e}")
+    st.stop()
+
+if not st.session_state.authenticated:
+    st.title("🔒 Restricted Access")
+    st.markdown("Please log in with your credentials to access the CEI & QOE Profiler Tool.")
+    
+    with st.form("login_form"):
+        email = st.text_input("Email Address")
+        password = st.text_input("Password", type="password")
+        submit = st.form_submit_button("Log In", use_container_width=True)
+        
+        if submit:
+            try:
+                response = supabase.client.auth.sign_in_with_password({"email": email, "password": password})
+                if response.user:
+                    st.session_state.authenticated = True
+                    st.rerun()
+            except Exception:
+                st.error("Invalid email or password. Please try again.")
+    
     st.stop()
 
 # Check if Streamlit caught an access token in the URL after a Google redirect
