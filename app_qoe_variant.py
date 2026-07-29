@@ -170,8 +170,8 @@ if data_source == "Cloud Database (Default)":
         # Load Main CEI Data (Concatenating Town and Brgy files)
         if 'cloud_df' not in st.session_state:
             with st.spinner("Fetching CEI Data from Cloud..."):
-                cei_town_bytes = supabase.client.storage.from_("qoe-data").download("CEI_QOE_Dashboard_CEI Data_Extraction_(Town)_Table.xlsx")
-                cei_brgy_bytes = supabase.client.storage.from_("qoe-data").download("CEI_QOE_Dashboard_CEI Data_Extraction_(Brgy)_Table.xlsx")
+                cei_town_bytes = supabase.client.storage.from_("qoe-data").download("CEI _QOE Dashboard_town_table.xlsx")
+                cei_brgy_bytes = supabase.client.storage.from_("qoe-data").download("CEI _QOE Dashboard_brgy_table.xlsx")
                 
                 df_town = pd.read_excel(io.BytesIO(cei_town_bytes))
                 df_brgy = pd.read_excel(io.BytesIO(cei_brgy_bytes))
@@ -183,7 +183,7 @@ if data_source == "Cloud Database (Default)":
         # Load Network Data
         if 'net_file_bytes' not in st.session_state:
             with st.spinner("Fetching Network Data from Cloud..."):
-                net_bytes = supabase.client.storage.from_("qoe-data").download("2G_3G_4G_5G_Network_Grouplist_AEPM_061526.xlsb")
+                net_bytes = supabase.client.storage.from_("qoe-data").download("Network_Grouplist.xlsb")
                 st.session_state['net_file_bytes'] = net_bytes
                 
         st.sidebar.success("✅ Cloud data loaded securely.")
