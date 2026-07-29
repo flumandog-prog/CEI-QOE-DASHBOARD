@@ -12,7 +12,7 @@ from st_supabase_connection import SupabaseConnection
 import streamlit as st
 from PIL import Image
 
-custom_icon = Image.open("my_icon.png") 
+custom_icon = Image.open("rgpm_icon.png") 
 
 st.set_page_config(
     page_title="RGPM T6 Profiler", 
