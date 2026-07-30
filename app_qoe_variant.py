@@ -445,11 +445,15 @@ if data_source == "Cloud Database (Default)":
     st.sidebar.caption("Browse and select datasets from Supabase Cloud Storage.")
     
     try:
-        bucket_files = supabase.client.storage.from_("qoe-data").list()
+        # Define the exact folder path we created in Supabase
+        folder_path = "Visayas_2026"
+        
+        # Tell Supabase to list files specifically inside this folder, not the root
+        bucket_files = supabase.client.storage.from_("qoe-data").list(path=folder_path)
         available_files = [file['name'] for file in bucket_files if file['name'] != '.emptyFolderPlaceholder']
         
         if not available_files:
-            st.sidebar.warning("No files found in the 'qoe-data' bucket.")
+            st.sidebar.warning(f"No files found in the '{folder_path}' folder.")
         else:
             st.sidebar.markdown("**Select Cloud Files**")
             
@@ -477,8 +481,8 @@ if data_source == "Cloud Database (Default)":
                 else:
                     with st.spinner("Streaming selected files from Supabase..."):
                         try:
-                            # Load CEI
-                            cei_bytes = supabase.client.storage.from_("qoe-data").download(selected_cei)
+                            # Append the folder_path to the download requests
+                            cei_bytes = supabase.client.storage.from_("qoe-data").download(f"{folder_path}/{selected_cei}")
                             if selected_cei.endswith('.csv'):
                                 st.session_state['cloud_df'] = pd.read_csv(io.BytesIO(cei_bytes))
                             else:
@@ -490,24 +494,24 @@ if data_source == "Cloud Database (Default)":
                                 del st.session_state['cloud_df'] 
                                 st.stop()
                             
-                            # Load Network
-                            net_bytes = supabase.client.storage.from_("qoe-data").download(selected_net)
+                            # Load Network from folder
+                            net_bytes = supabase.client.storage.from_("qoe-data").download(f"{folder_path}/{selected_net}")
                             st.session_state['net_file_bytes'] = net_bytes
                             
-                            # Load Utilization if selected
+                            # Load Utilization from folder if selected
                             if selected_util != "--- Select File ---":
-                                util_bytes = supabase.client.storage.from_("qoe-data").download(selected_util)
+                                util_bytes = supabase.client.storage.from_("qoe-data").download(f"{folder_path}/{selected_util}")
                                 st.session_state['util_file_bytes'] = util_bytes
                             else:
                                 st.session_state.pop('util_file_bytes', None)
                                 
                             st.rerun()
                         except Exception as exc:
-                            st.sidebar.error(f"Error loading files: {exc}")
+                            st.sidebar.error(f"Error loading files from folder: {exc}")
         
         if 'cloud_df' in st.session_state and 'net_file_bytes' in st.session_state:
             df = st.session_state['cloud_df']
-            st.sidebar.success("✅ Cloud data loaded securely.")
+            st.sidebar.success(f"✅ Cloud data loaded securely from {folder_path}.")
             
     except Exception as e:
         st.sidebar.error(f"Failed to connect to the database. Error: {e}")
