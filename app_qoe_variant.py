@@ -941,7 +941,7 @@ with col2:
                     elif sec_psg_col and active_psgcs:
                         util_sector_df = util_sector_df[util_sector_df[sec_psg_col].isin(active_psgcs)]
                         
-                # 3. Filter ENODE_BBU_Board strictly based on active eNodeB names from Cell Detailss
+                # 3. Filter ENODE_BBU_Board strictly based on active eNodeB names from Cell Details
                 util_bbu_df = util_dfs.get("ENODE_BBU_Board", pd.DataFrame())
                 if not util_bbu_df.empty and not util_cell_df.empty:
                     enode_col = _find_column(util_cell_df, "eNode B Name")
