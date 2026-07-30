@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import folium
+import branca.colormap as cm
 from folium.plugins import Fullscreen
 from streamlit_folium import st_folium
 import json
@@ -9,25 +10,88 @@ import io
 import streamlit.components.v1 as components
 import plotly.express as px
 from st_supabase_connection import SupabaseConnection
-import streamlit as st
 from PIL import Image
 import base64
 
 # Function to read your image and convert it to a format HTML can understand
 def get_base64_image(image_path):
-    with open(image_path, "rb") as img_file:
-        return base64.b64encode(img_file.read()).decode()
+    try:
+        with open(image_path, "rb") as img_file:
+            return base64.b64encode(img_file.read()).decode()
+    except:
+        return ""
 
 # Convert your icon
 icon_base64 = get_base64_image("rgpm_icon.png")
 
-custom_icon = Image.open("rgpm_icon.png") 
+try:
+    custom_icon = Image.open("rgpm_icon.png") 
+except:
+    custom_icon = "🌍"
 
 st.set_page_config(
     page_title="RGPM T6 Profiler", 
     page_icon=custom_icon,
     layout="wide"
 )
+
+# =====================================================
+# NEW CSS: VIBRANT & COLORFUL THEME
+# =====================================================
+st.markdown("""
+<style>
+/* Colorful Gradient Main Background */
+[data-testid="stAppViewContainer"] {
+    background: linear-gradient(135deg, #dbeafe 0%, #cffafe 50%, #d1fae5 100%) !important;
+}
+
+/* Transparent Header to blend with background */
+[data-testid="stHeader"] {
+    background-color: transparent !important;
+}
+
+/* Colorful Gradient Sidebar */
+[data-testid="stSidebar"] {
+    background: linear-gradient(180deg, #bfdbfe 0%, #ddd6fe 50%, #a7f3d0 100%) !important;
+    border-right: 2px solid #ffffff;
+    color: #0f172a !important;
+}
+
+/* Target Streamlit's native st.metric to make them Pop */
+[data-testid="stMetric"] {
+    background-color: #ffffff;
+    border: 2px solid #3b82f6 !important; /* Bright blue border */
+    border-radius: 12px;
+    padding: 15px 20px;
+    box-shadow: 0 8px 20px rgba(59, 130, 246, 0.15); /* Colorful drop shadow */
+}
+
+/* Metric Label (Title) */
+[data-testid="stMetricLabel"] > div {
+    color: #0d9488 !important; /* Bright teal */
+    font-weight: 800 !important;
+    font-size: 14px !important;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+/* Metric Value (Number) */
+[data-testid="stMetricValue"] > div {
+    color: #1e40af !important; /* Bright navy */
+    font-weight: 900 !important;
+    font-size: 38px !important;
+    text-shadow: 1px 1px 2px rgba(0,0,0,0.05);
+}
+
+/* Subheaders */
+h2, h3 {
+    color: #1e3a8a !important; 
+    font-weight: 900 !important;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+</style>
+""", unsafe_allow_html=True)
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -79,29 +143,19 @@ if not st.session_state.authenticated:
                 padding-top: 10px;
                 padding-bottom: 10px;
             }
-            
-            /* Global Background Gradient */
-            .stApp {
-                background: linear-gradient(
-                    to bottom right, 
-                    rgba(0, 0, 139, 0.15),   
-                    rgba(153, 255, 102, 0.20) 
-                );
-                background-attachment: fixed;
-                background-size: cover;
-            }
         </style>
     """, unsafe_allow_html=True)
      
     # Official Titles
+    img_html = f"<img src='data:image/png;base64,{icon_base64}' width='75'>" if icon_base64 else ""
     st.markdown(f"""
         <div style='display: flex; justify-content: center; align-items: center; gap: 15px; margin-bottom: 5px;'>
-            <img src='data:image/png;base64,{icon_base64}' width='75'>
-            <h1 style='margin: 0; padding: 0; text-shadow: 0px 0px 12px rgba(0, 88, 163, 0.7);'>RGPM T6 Profiler</h1>
+            {img_html}
+            <h1 style='margin: 0; padding: 0; text-shadow: 0px 0px 12px rgba(0, 88, 163, 0.7); color: #1e3a8a;'>RGPM T6 Profiler</h1>
         </div>
     """, unsafe_allow_html=True)
     
-    st.markdown("<p style='text-align: center; color: #555; font-size: 16px; margin-top: 0px;'>Globe Telecom • Territory 6 (Visayas)<br>CEI & QoE Spatial Analysis Dashboard</p>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center; color: #1e40af; font-weight: bold; font-size: 16px; margin-top: 0px;'>Globe Telecom • Territory 6 (Visayas)<br>CEI & QoE Spatial Analysis Dashboard</p>", unsafe_allow_html=True)
     st.markdown("---")
     
     tab1, tab2 = st.tabs(["🔒 Secure Log In", "📝 Request Access"])
@@ -352,11 +406,27 @@ def load_utilization_file(file_bytes):
             
         return util_df
 
-# --- LOGGED IN VIEW ---
-st.sidebar.image(
-    "https://upload.wikimedia.org/wikipedia/en/thumb/f/fa/Globe_Telecom_logo.svg/512px-Globe_Telecom_logo.svg.png", 
-    use_container_width=True
-)
+# --- LOGOS SECTION ---
+st.sidebar.markdown("<br>", unsafe_allow_html=True)
+logo_col1, logo_col2, logo_col3 = st.sidebar.columns(3)
+
+with logo_col1:
+    try:
+        st.image("Globe_Logo.png.png", use_container_width=True)
+    except:
+        pass
+
+with logo_col2:
+    try:
+        st.image("RgPM_Logo.png.png", use_container_width=True)
+    except:
+        pass
+
+with logo_col3:
+    try:
+        st.image("T6_LoGo.png.png", use_container_width=True)
+    except:
+        pass
 st.sidebar.markdown("---")
 
 # --- SIDEBAR & DATA SOURCE SELECTION ---
@@ -393,7 +463,7 @@ if data_source == "Cloud Database (Default)":
                 ["--- Select File ---"] + available_files
             )
             
-            # New Selectbox for Utilization
+            # Selectbox for Utilization
             selected_util = st.sidebar.selectbox(
                 "Select Utilization Report (XLSB) [Optional]:", 
                 ["--- Select File ---"] + available_files
@@ -598,7 +668,7 @@ filtered_df = temp_df_town.copy()
 if selected_brgy != "All" and 'Brgy' in filtered_df.columns:
     filtered_df = filtered_df[filtered_df['Brgy'] == selected_brgy]
 
-# --- NEW RANGE SLIDER METRIC FILTER ---
+# --- RANGE SLIDER METRIC FILTER (RETAINED) ---
 st.sidebar.markdown("### METRIC FILTERS")
 if not filtered_df.empty and 'AVG CEI' in filtered_df.columns:
     min_cei_val = float(filtered_df['AVG CEI'].min())
@@ -649,7 +719,7 @@ with st.sidebar.expander("📍 Site Markers", expanded=True):
     marker_icon_name = st.selectbox(
         "Marker Icon Shape",
         ["Map Pin", "Signal Bars", "WiFi", "Crosshairs", "Star"],
-        index=0,
+        index=1,
         help="Select the icon used to display cell sites on the map."
     )
     show_active = st.checkbox("Show Active Sites", value=False)
@@ -722,7 +792,9 @@ with col1:
         st.metric("VoLTE QoE", f"{get_avg(filtered_df, 'AVG Volte QOE'):.2f}")
 
 with col2:
-    st.subheader("Geographic Profiling Map")
+    header_col, popup_col = st.columns([3, 1])
+    with header_col:
+        st.subheader("Geographic Profiling Map")
     
     if st.session_state.get('net_file_bytes') is None and (show_active or show_decom):
         st.warning("⚠️ Please upload the Network Grouplist (XLSB) file in the sidebar to view cell site markers.")
@@ -736,10 +808,12 @@ with col2:
     m = folium.Map(location=[12.8797, 121.7740], zoom_start=6, tiles=tile_map[basemap_choice])
     Fullscreen(position='topleft', force_separate_button=True).add_to(m)
     
-    active_psgcs = set()
     if psgc_col and master_geo_data and not filtered_df.empty:
         active_psgcs = set(filtered_df[psgc_col].tolist())
         overall_avg_cei = round(get_avg(filtered_df, 'AVG CEI'), 2)
+        
+        # 🚀 MAP OPTIMIZATION 1: PRE-COMPUTED DICTIONARY 
+        grouped_metrics = filtered_df.groupby(psgc_col)[['AVG CEI', 'AVG Data CEI', 'AVG Voice CEI']].mean().to_dict('index')
         
         filtered_geo_features = []
         for feature in master_geo_data['features']:
@@ -759,16 +833,19 @@ with col2:
             
             if psgc_match or adm_match:
                 matched_key = raw_psgc if psgc_match else clean_adm
-                loc_df = filtered_df[filtered_df[psgc_col] == matched_key]
+                
+                # Lightning fast lookup instead of dataframe scanning
+                metrics = grouped_metrics.get(matched_key, {})
+                
                 loc_name = (props.get('adm4_name') or props.get('ADM4_EN') or 
                             props.get('adm3_name') or props.get('ADM3_EN') or 
                             props.get('adm2_name') or props.get('ADM2_EN') or 'Unknown Location')
                 
                 feature['properties']['unified_key'] = matched_key
                 feature['properties']['Location'] = loc_name
-                feature['properties']['Avg_CEI'] = round(loc_df['AVG CEI'].mean(), 2) if not loc_df.empty else overall_avg_cei
-                feature['properties']['Data_CEI'] = round(loc_df['AVG Data CEI'].mean(), 2) if not loc_df.empty else 0.0
-                feature['properties']['Voice_CEI'] = round(loc_df['AVG Voice CEI'].mean(), 2) if not loc_df.empty else 0.0
+                feature['properties']['Avg_CEI'] = round(metrics.get('AVG CEI', overall_avg_cei), 2)
+                feature['properties']['Data_CEI'] = round(metrics.get('AVG Data CEI', 0.0), 2)
+                feature['properties']['Voice_CEI'] = round(metrics.get('AVG Voice CEI', 0.0), 2)
                 
                 filtered_geo_features.append(feature)
         
@@ -798,15 +875,20 @@ with col2:
                             filtered_sites = filtered_sites[~is_active_site]
                         elif not show_active and not show_decom:
                             filtered_sites = filtered_sites.iloc[0:0]
+                            
+                        # 🚀 MAP OPTIMIZATION 2: RENDER LIMIT TO PREVENT CRASHES
+                        if len(filtered_sites) > 3000:
+                            st.warning(f"⚠️ {len(filtered_sites):,} sites found in this wide area. Individual pins have been hidden to ensure fast map loading. Please filter by Town or Barangay to see them.")
+                            filtered_sites = pd.DataFrame() 
+                            
             except Exception as network_error:
                 st.error(f"Unable to process cell-site data: {network_error}")
 
-        # Process Utilization Data specifically for the new tab
+        # Process Utilization Data specifically for the retained Utilization tab
         util_df = pd.DataFrame()
         if st.session_state.get('util_file_bytes') is not None:
             try:
                 util_df = load_utilization_file(st.session_state['util_file_bytes'])
-                # Filter down to only show utilization for currently active map areas
                 if not util_df.empty and active_psgcs:
                     util_psg_col = _find_column(util_df, "CITY PSG CODE", "CITY_PSG_CODE")
                     if util_psg_col:
@@ -814,17 +896,47 @@ with col2:
             except Exception as util_error:
                 st.error(f"Unable to process Utilization data: {util_error}")
 
+        # --- UI OPTIMIZATION 1: POPOVER CELL SITE DATA ---
+        with popup_col:
+            with st.popover("📊 View Cell Site Data", use_container_width=True):
+                if filtered_sites.empty:
+                    st.info("No cell-site data is available for this selection.")
+                else:
+                    st.markdown("**Filtered Cell Site Data**")
+                    st.dataframe(filtered_sites, use_container_width=True, height=400)
+
         if lightweight_geo_data['features']:
-            choro = folium.Choropleth(
-                geo_data=lightweight_geo_data,
-                name="choropleth", data=filtered_df, columns=[psgc_col, 'AVG CEI'], 
-                key_on="feature.properties.unified_key", fill_color="YlGnBu",
-                fill_opacity=polygon_opacity, line_opacity=polygon_border_opacity, 
-                legend_name="Average CEI Score", highlight=True
+            
+            # --- MAP OPTIMIZATION 3: CUSTOM COLORMAP RENDERING ---
+            colormap = cm.StepColormap(
+                colors=['#ef4444', '#f59e0b', '#93c5fd', '#3b82f6', '#1e3a8a'],
+                index=[0, 71, 81, 88, 95, 100],
+                vmin=0, vmax=100,
+                caption='Average CEI Score'
+            )
+            
+            for f in lightweight_geo_data['features']:
+                f['properties']['fillColor'] = colormap(f['properties']['Avg_CEI'])
+            
+            geo_layer = folium.GeoJson(
+                lightweight_geo_data,
+                style_function=lambda x: {
+                    'fillColor': x['properties']['fillColor'],
+                    'color': 'black',
+                    'weight': 1,
+                    'fillOpacity': polygon_opacity,
+                    'opacity': polygon_border_opacity
+                },
+                highlight_function=lambda x: {'weight': 2, 'color': 'white'},
+                tooltip=folium.features.GeoJsonTooltip(
+                    fields=['Location', 'Avg_CEI'], 
+                    aliases=['Location:', 'Overall CEI:'], 
+                    style="background-color: white; color: #333333; font-family: arial; padding: 8px;"
+                )
             ).add_to(m)
             
-            tooltip = folium.features.GeoJsonTooltip(fields=['Location', 'Avg_CEI'], aliases=['Location:', 'Overall CEI:'], style="background-color: white; color: #333333; font-family: arial; padding: 8px;")
-            choro.geojson.add_child(tooltip)
+            colormap.add_to(m)
+            # --------------------------------------------
             
             if not filtered_sites.empty:
                 for _, row in filtered_sites.iterrows():
@@ -984,6 +1096,7 @@ with col2:
         else:
             st.info("No matching map boundaries found for the current data selection.")
 
+    # Render map and listen for clicks on the choropleth polygons
     map_output = st_folium(
         m, 
         use_container_width=True, 
@@ -991,6 +1104,7 @@ with col2:
         returned_objects=["last_active_drawing"]
     )
 
+    # Process the click event
     if map_output and map_output.get("last_active_drawing"):
         clicked_location = map_output["last_active_drawing"]["properties"].get("Location")
 
@@ -1029,12 +1143,12 @@ with col2:
             if needs_rerun:
                 st.rerun()
 
-# --- TABBED DATA VIEW SECTION ---
+# --- TABBED DATA VIEW SECTION (RETAINED) ---
 st.markdown("---")
 tab_custom_css = """<style>div[data-baseweb="tab-list"] {border-bottom: 2px solid #000000 !important;} button[data-baseweb="tab"] {border: 2px solid #a0a0a0 !important; border-radius: 8px 8px 0px 0px !important; padding: 12px 24px !important; margin-right: 6px !important; font-weight: 900 !important; font-size: 18px !important; background-color: #f1f3f6 !important; color: #555555 !important;} button[data-baseweb="tab"][aria-selected="true"] {border: 2px solid #000000 !important; border-bottom: 3px solid #ffffff !important; background-color: #ffffff !important; color: #000000 !important;}</style>"""
 st.markdown(tab_custom_css, unsafe_allow_html=True)
 
-# Added the third tab for Utilization
+# Retaining the three tabs as requested
 tab_chart, tab_site_data, tab_data = st.tabs(["Performance Trend Line Chart", "📊 Sector & Hardware Utilization", "Raw Data File"])
 
 with tab_chart:
@@ -1085,16 +1199,10 @@ with tab_chart:
     else:
         st.caption("Trend line chart unavailable: Missing time or metric columns.")
 
-# New Detailed Data Tab
+# Retained Detailed Data Tab, specifically for Utilization Data
 with tab_site_data:
     st.write("**GRANULAR SECTOR & HARDWARE DETAILS:**")
-    st.caption("Displays cell site and utilization data for the currently filtered geography.")
-    
-    if 'filtered_sites' in locals() and not filtered_sites.empty:
-        st.markdown("**Network Grouplist Sites (Active Geographies)**")
-        st.dataframe(filtered_sites, use_container_width=True, height=250)
-    else:
-        st.info("No basic network site data is available for the current map selection.")
+    st.caption("Displays utilization data for the currently filtered geography. For raw cell sites, refer to the Map popover.")
         
     if 'util_df' in locals() and not util_df.empty:
         st.markdown("**LTE eNodeB Utilization (Cell Details)**")
