@@ -29,7 +29,6 @@ st.set_page_config(
     layout="wide"
 )
 
-
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # --- AUTHENTICATION GATEKEEPER WITH BRANDING ---
@@ -95,7 +94,6 @@ if not st.session_state.authenticated:
     """, unsafe_allow_html=True)
      
     # Official Titles
-    # Using flexbox to center and adding a text-shadow for the glow effect
     st.markdown(f"""
         <div style='display: flex; justify-content: center; align-items: center; gap: 15px; margin-bottom: 5px;'>
             <img src='data:image/png;base64,{icon_base64}' width='75'>
@@ -103,11 +101,9 @@ if not st.session_state.authenticated:
         </div>
     """, unsafe_allow_html=True)
     
-    # Your existing subtitle remains exactly the same
     st.markdown("<p style='text-align: center; color: #555; font-size: 16px; margin-top: 0px;'>Globe Telecom • Territory 6 (Visayas)<br>CEI & QoE Spatial Analysis Dashboard</p>", unsafe_allow_html=True)
     st.markdown("---")
     
-    # Clean Tab Navigation instead of Radio Buttons
     tab1, tab2 = st.tabs(["🔒 Secure Log In", "📝 Request Access"])
     
     with tab1:
@@ -145,20 +141,16 @@ if not st.session_state.authenticated:
                         
     st.stop()
     
-# Check if Streamlit caught an access token in the URL after a Google redirect
 query_params = st.query_params
 if "code" in query_params or "access_token" in query_params:
     st.session_state.authenticated = True
-    # Clear the URL parameters so it looks clean
     st.query_params.clear()
 
-# If the user is NOT logged in, show the Google login button and stop the app
 if not st.session_state.authenticated:
     st.title("🔒 Restricted Access")
     st.markdown("Please log in with your authorized Google account to access the CEI & QOE Profiler Tool.")
     
     try:
-        # Generate the secure Google OAuth URL from Supabase
         auth_response = supabase.client.auth.sign_in_with_oauth(
             {
                 "provider": "google",
@@ -168,7 +160,6 @@ if not st.session_state.authenticated:
             }
         )
         
-        # Display the login button
         st.markdown(
             f"""
             <a href="{auth_response.url}" target="_self">
@@ -181,13 +172,10 @@ if not st.session_state.authenticated:
         )
     except Exception as e:
         st.error(f"Failed to load Google Authentication: {e}")
-    
-    # Halt execution so the rest of the dashboard doesn't load
     st.stop()
 
 # --- STRICT DATA GOVERNANCE: PILOT CEI TEMPLATE VALIDATOR ---
 def validate_cei_template(dataframe):
-    """Enforces strict column headers to prevent processing errors."""
     required_columns = [
         "Province", "Town", "Brgy", "Monthly",
         "AVG CEI", "AVG Data CEI", "AVG Voice CEI",
@@ -239,7 +227,6 @@ def _pla_id(value):
 # --- MASTER XLSB CELL-SITE LOADER (BYTE-STREAM BASED) ---
 @st.cache_data(ttl=3600, show_spinner="Loading cell-site network data. This may take a moment...")
 def load_master_network_file(file_bytes):
-    """Load map coordinates and network summaries from the master XLSB raw byte stream."""
     with pd.ExcelFile(io.BytesIO(file_bytes), engine="pyxlsb") as workbook:
         base_sheet = _find_sheet(workbook.sheet_names, "Technology per Site")
         if base_sheet is None:
@@ -341,9 +328,31 @@ def load_master_network_file(file_bytes):
         base = pd.concat([base, decommissioned_only_sites], ignore_index=True, sort=False)
     return base.dropna(subset=[lat_col, lon_col])
 
+# --- MASTER XLSB UTILIZATION LOADER ---
+@st.cache_data(ttl=3600, show_spinner="Processing Utilization Report...")
+def load_utilization_file(file_bytes):
+    """Parses Cell Details and purges unmappable ghost data."""
+    with pd.ExcelFile(io.BytesIO(file_bytes), engine="pyxlsb") as workbook:
+        if "Cell Details" not in workbook.sheet_names:
+            raise ValueError("Utilization file must contain a 'Cell Details' sheet.")
+            
+        util_df = pd.read_excel(workbook, sheet_name="Cell Details")
+        util_df = _clean_columns(util_df)
+        
+        pla_col = _find_column(util_df, "PLA ID")
+        psg_col = _find_column(util_df, "CITY PSG CODE", "CITY_PSG_CODE")
+        
+        if pla_col:
+            util_df[pla_col] = util_df[pla_col].map(_pla_id)
+            
+        if psg_col:
+            # Strictly drop ghost data with no mapping identifiers
+            util_df = util_df.dropna(subset=[psg_col])
+            util_df[psg_col] = util_df[psg_col].map(_network_psgc)
+            
+        return util_df
 
 # --- LOGGED IN VIEW ---
-# Add the Globe Telecom logo to the top of the sidebar
 st.sidebar.image(
     "https://upload.wikimedia.org/wikipedia/en/thumb/f/fa/Globe_Telecom_logo.svg/512px-Globe_Telecom_logo.svg.png", 
     use_container_width=True
@@ -366,10 +375,7 @@ if data_source == "Cloud Database (Default)":
     st.sidebar.caption("Browse and select datasets from Supabase Cloud Storage.")
     
     try:
-        # 1. Dynamically fetch the list of files in the bucket
         bucket_files = supabase.client.storage.from_("qoe-data").list()
-        
-        # Extract just the file names, ignoring hidden system placeholders
         available_files = [file['name'] for file in bucket_files if file['name'] != '.emptyFolderPlaceholder']
         
         if not available_files:
@@ -377,7 +383,6 @@ if data_source == "Cloud Database (Default)":
         else:
             st.sidebar.markdown("**Select Cloud Files**")
             
-            # 2. Use single-select dropdowns for both CEI and Network files to prevent map conflicts
             selected_cei = st.sidebar.selectbox(
                 "Select QOE/CEI Data (Single File):", 
                 ["--- Select File ---"] + available_files
@@ -388,7 +393,12 @@ if data_source == "Cloud Database (Default)":
                 ["--- Select File ---"] + available_files
             )
             
-            # 3. Add a button to execute the download only when the user is ready
+            # New Selectbox for Utilization
+            selected_util = st.sidebar.selectbox(
+                "Select Utilization Report (XLSB) [Optional]:", 
+                ["--- Select File ---"] + available_files
+            )
+            
             if st.sidebar.button("⬇️ Load Selected Cloud Data", use_container_width=True):
                 if selected_cei == "--- Select File ---":
                     st.sidebar.error("Please select a CEI file.")
@@ -397,29 +407,34 @@ if data_source == "Cloud Database (Default)":
                 else:
                     with st.spinner("Streaming selected files from Supabase..."):
                         try:
-                            # Download the single CEI file
+                            # Load CEI
                             cei_bytes = supabase.client.storage.from_("qoe-data").download(selected_cei)
                             if selected_cei.endswith('.csv'):
                                 st.session_state['cloud_df'] = pd.read_csv(io.BytesIO(cei_bytes))
                             else:
                                 st.session_state['cloud_df'] = pd.read_excel(io.BytesIO(cei_bytes))
                             
-                            # Execute Strict Data Validation
                             is_valid, error_msg = validate_cei_template(st.session_state['cloud_df'])
                             if not is_valid:
                                 st.sidebar.error(error_msg)
-                                del st.session_state['cloud_df'] # Drop the bad data
+                                del st.session_state['cloud_df'] 
                                 st.stop()
                             
-                            # Download the single Network Grouplist
+                            # Load Network
                             net_bytes = supabase.client.storage.from_("qoe-data").download(selected_net)
                             st.session_state['net_file_bytes'] = net_bytes
                             
+                            # Load Utilization if selected
+                            if selected_util != "--- Select File ---":
+                                util_bytes = supabase.client.storage.from_("qoe-data").download(selected_util)
+                                st.session_state['util_file_bytes'] = util_bytes
+                            else:
+                                st.session_state.pop('util_file_bytes', None)
+                                
                             st.rerun()
                         except Exception as exc:
                             st.sidebar.error(f"Error loading files: {exc}")
         
-        # 4. If data is successfully loaded in memory, map it to the main dataframe
         if 'cloud_df' in st.session_state and 'net_file_bytes' in st.session_state:
             df = st.session_state['cloud_df']
             st.sidebar.success("✅ Cloud data loaded securely.")
@@ -434,6 +449,9 @@ elif data_source == "Manual File Upload":
     st.sidebar.caption("Upload your Network Grouplist to view cell sites.")
     uploaded_net_file = st.sidebar.file_uploader("Upload Network Grouplist (XLSB)", type=['xlsb'])
     
+    st.sidebar.caption("Upload your Utilization Report to view granular details.")
+    uploaded_util_file = st.sidebar.file_uploader("Upload Utilization Report (XLSB)", type=['xlsb'])
+    
     if uploaded_cei_file:
         try:
             if uploaded_cei_file.name.endswith('.csv'):
@@ -441,11 +459,10 @@ elif data_source == "Manual File Upload":
             else:
                 df = pd.read_excel(uploaded_cei_file)
                 
-            # Execute Strict Data Validation
             is_valid, error_msg = validate_cei_template(df)
             if not is_valid:
                 st.sidebar.error(error_msg)
-                df = pd.DataFrame() # Drop the bad dataframe
+                df = pd.DataFrame() 
                 st.stop()
                 
         except Exception as exc:
@@ -455,10 +472,13 @@ elif data_source == "Manual File Upload":
         st.session_state['net_file_bytes'] = uploaded_net_file.getvalue()
     else:
         st.session_state.pop('net_file_bytes', None)
+        
+    if uploaded_util_file:
+        st.session_state['util_file_bytes'] = uploaded_util_file.getvalue()
+    else:
+        st.session_state.pop('util_file_bytes', None)
 
-# Halt execution if no data is loaded yet
 if df.empty:
-    # Render the logout button before halting if no data is present
     st.sidebar.markdown("---")
     if st.sidebar.button("🚪 Logout", key="logout_empty", use_container_width=True):
         st.session_state.authenticated = False
@@ -487,7 +507,7 @@ if 'Monthly' in df.columns:
     df['Parsed_Year'] = df['Parsed_Date'].dt.year
 
 # --- CASCADING SIDEBAR FILTERS ---
-st.sidebar.markdown("### FILTERS")
+st.sidebar.markdown("### GEOGRAPHIC FILTERS")
 
 if 'Parsed_Year' in df.columns and 'Monthly' in df.columns:
     years = ["All"] + sorted([str(int(y)) for y in df['Parsed_Year'].dropna().unique()])
@@ -517,7 +537,6 @@ temp_df_mo = temp_df_yr.copy()
 if selected_month != "All" and 'Monthly' in temp_df_mo.columns:
     temp_df_mo = temp_df_mo[temp_df_mo['Monthly'] == selected_month]
 
-# Initialize decoupled session state keys for geographic filters
 if 'map_province' not in st.session_state: st.session_state.map_province = "All"
 if 'map_town' not in st.session_state: st.session_state.map_town = "All"
 if 'map_brgy' not in st.session_state: st.session_state.map_brgy = "All"
@@ -579,6 +598,27 @@ filtered_df = temp_df_town.copy()
 if selected_brgy != "All" and 'Brgy' in filtered_df.columns:
     filtered_df = filtered_df[filtered_df['Brgy'] == selected_brgy]
 
+# --- NEW RANGE SLIDER METRIC FILTER ---
+st.sidebar.markdown("### METRIC FILTERS")
+if not filtered_df.empty and 'AVG CEI' in filtered_df.columns:
+    min_cei = float(filtered_df['AVG CEI'].min())
+    max_cei = float(filtered_df['AVG CEI'].max())
+    
+    if min_cei != max_cei:
+        selected_cei_range = st.sidebar.slider(
+            "Filter by AVG CEI Score Range:",
+            min_value=min_cei,
+            max_value=max_cei,
+            value=(min_cei, max_cei),
+            step=0.1
+        )
+        filtered_df = filtered_df[
+            (filtered_df['AVG CEI'] >= selected_cei_range[0]) & 
+            (filtered_df['AVG CEI'] <= selected_cei_range[1])
+        ]
+    else:
+        st.sidebar.info(f"AVG CEI is uniform at {min_cei:.2f}")
+
 st.sidebar.markdown("### DASHBOARD SETTINGS")
 
 with st.sidebar.expander("🌍 Map Styling", expanded=True):
@@ -610,8 +650,6 @@ fa_icon_map = {
 }
 selected_fa_icon = fa_icon_map[marker_icon_name]
 
-# --- LOGOUT BUTTON AT THE VERY BOTTOM ---
-# This renders the button at the bottom of the filters if the data loaded successfully.
 st.sidebar.markdown("---")
 if st.sidebar.button("🚪 Logout", key="logout_full", use_container_width=True):
     st.session_state.authenticated = False
@@ -627,7 +665,6 @@ def get_avg(dataframe, col_name):
         return dataframe[col_name].mean()
     return 0.0
 
-# --- OFFLINE GEOJSON LOADING ---
 @st.cache_data
 def load_local_geojson(level):
     folder_name = "geojson_data"
@@ -671,9 +708,7 @@ with col1:
         st.metric("VoLTE QoE", f"{get_avg(filtered_df, 'AVG Volte QOE'):.2f}")
 
 with col2:
-    header_col, popup_col = st.columns([3, 1])
-    with header_col:
-        st.subheader("Geographic Profiling Map")
+    st.subheader("Geographic Profiling Map")
     
     if st.session_state.get('net_file_bytes') is None and (show_active or show_decom):
         st.warning("⚠️ Please upload the Network Grouplist (XLSB) file in the sidebar to view cell site markers.")
@@ -687,6 +722,7 @@ with col2:
     m = folium.Map(location=[12.8797, 121.7740], zoom_start=6, tiles=tile_map[basemap_choice])
     Fullscreen(position='topleft', force_separate_button=True).add_to(m)
     
+    active_psgcs = set()
     if psgc_col and master_geo_data and not filtered_df.empty:
         active_psgcs = set(filtered_df[psgc_col].tolist())
         overall_avg_cei = round(get_avg(filtered_df, 'AVG CEI'), 2)
@@ -751,13 +787,18 @@ with col2:
             except Exception as network_error:
                 st.error(f"Unable to process cell-site data: {network_error}")
 
-        with popup_col:
-            with st.popover("📊 View Cell Site Data", use_container_width=True):
-                if filtered_sites.empty:
-                    st.info("No cell-site data is available for this selection.")
-                else:
-                    st.markdown("**Filtered Cell Site Data**")
-                    st.dataframe(filtered_sites, use_container_width=True, height=400)
+        # Process Utilization Data specifically for the new tab
+        util_df = pd.DataFrame()
+        if st.session_state.get('util_file_bytes') is not None:
+            try:
+                util_df = load_utilization_file(st.session_state['util_file_bytes'])
+                # Filter down to only show utilization for currently active map areas
+                if not util_df.empty and active_psgcs:
+                    util_psg_col = _find_column(util_df, "CITY PSG CODE", "CITY_PSG_CODE")
+                    if util_psg_col:
+                        util_df = util_df[util_df[util_psg_col].isin(active_psgcs)]
+            except Exception as util_error:
+                st.error(f"Unable to process Utilization data: {util_error}")
 
         if lightweight_geo_data['features']:
             choro = folium.Choropleth(
@@ -929,7 +970,6 @@ with col2:
         else:
             st.info("No matching map boundaries found for the current data selection.")
 
-    # Render map and listen for clicks on the choropleth polygons
     map_output = st_folium(
         m, 
         use_container_width=True, 
@@ -937,14 +977,12 @@ with col2:
         returned_objects=["last_active_drawing"]
     )
 
-    # Process the click event
     if map_output and map_output.get("last_active_drawing"):
         clicked_location = map_output["last_active_drawing"]["properties"].get("Location")
 
         if clicked_location:
             needs_rerun = False
             
-            # 1. Did they click a Province?
             if 'Province' in df.columns and clicked_location in df['Province'].values:
                 if st.session_state.map_province != clicked_location:
                     st.session_state.map_province = clicked_location
@@ -952,10 +990,8 @@ with col2:
                     st.session_state.map_brgy = "All"
                     needs_rerun = True
                     
-            # 2. Did they click a Town?
             elif 'Town' in df.columns and clicked_location in df['Town'].values:
                 if st.session_state.map_town != clicked_location:
-                    # Backfill the Province
                     if 'Province' in df.columns:
                         parent_province = df[df['Town'] == clicked_location]['Province'].dropna().iloc[0]
                         st.session_state.map_province = str(parent_province)
@@ -964,10 +1000,8 @@ with col2:
                     st.session_state.map_brgy = "All"
                     needs_rerun = True
                     
-            # 3. Did they click a Barangay?
             elif 'Brgy' in df.columns and clicked_location in df['Brgy'].values:
                 if st.session_state.map_brgy != clicked_location:
-                    # Backfill both Province and Town
                     match_row = df[df['Brgy'] == clicked_location].iloc[0]
                     
                     if 'Province' in df.columns:
@@ -978,17 +1012,16 @@ with col2:
                     st.session_state.map_brgy = clicked_location
                     needs_rerun = True
 
-            # Force the dashboard to reload with the fully synchronized constraints
             if needs_rerun:
                 st.rerun()
-
 
 # --- TABBED DATA VIEW SECTION ---
 st.markdown("---")
 tab_custom_css = """<style>div[data-baseweb="tab-list"] {border-bottom: 2px solid #000000 !important;} button[data-baseweb="tab"] {border: 2px solid #a0a0a0 !important; border-radius: 8px 8px 0px 0px !important; padding: 12px 24px !important; margin-right: 6px !important; font-weight: 900 !important; font-size: 18px !important; background-color: #f1f3f6 !important; color: #555555 !important;} button[data-baseweb="tab"][aria-selected="true"] {border: 2px solid #000000 !important; border-bottom: 3px solid #ffffff !important; background-color: #ffffff !important; color: #000000 !important;}</style>"""
 st.markdown(tab_custom_css, unsafe_allow_html=True)
 
-tab_chart, tab_data = st.tabs(["Performance Trend Line Chart", "Raw Data File"])
+# Added the third tab for Utilization
+tab_chart, tab_site_data, tab_data = st.tabs(["Performance Trend Line Chart", "📊 Sector & Hardware Utilization", "Raw Data File"])
 
 with tab_chart:
     avg_columns = [col for col in filtered_df.columns if 'AVG' in col.upper()]
@@ -1037,6 +1070,23 @@ with tab_chart:
             st.info("Please select at least one metric checkbox above to render the trend line chart.")
     else:
         st.caption("Trend line chart unavailable: Missing time or metric columns.")
+
+# New Detailed Data Tab
+with tab_site_data:
+    st.write("**GRANULAR SECTOR & HARDWARE DETAILS:**")
+    st.caption("Displays cell site and utilization data for the currently filtered geography.")
+    
+    if 'filtered_sites' in locals() and not filtered_sites.empty:
+        st.markdown("**Network Grouplist Sites (Active Geographies)**")
+        st.dataframe(filtered_sites, use_container_width=True, height=250)
+    else:
+        st.info("No basic network site data is available for the current map selection.")
+        
+    if 'util_df' in locals() and not util_df.empty:
+        st.markdown("**LTE eNodeB Utilization (Cell Details)**")
+        st.dataframe(util_df, use_container_width=True, height=350)
+    elif st.session_state.get('util_file_bytes') is None:
+        st.warning("⚠️ Utilization Report not loaded. Please select or upload it in the sidebar to view detailed hardware metrics.")
                                   
 with tab_data:
     st.write("**RAW DATA VIEW:**")
