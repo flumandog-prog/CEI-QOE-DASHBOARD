@@ -414,31 +414,6 @@ def load_utilization_file(file_bytes):
                 dfs[sheet_name] = df
     return dfs
 
-
-# --- NEW: SECTOR DETAILS EXTRACTOR (FOR ANTENNA SPECS) ---
-@st.cache_data(ttl=3600, show_spinner="Extracting granular antenna details from Network Grouplist...")
-def load_sector_details(file_bytes):
-    """Extracts granular site specifics (Azimuth, Tilts, ACL, Lat/Long) from the Network Grouplist sheets."""
-    dfs = []
-    with pd.ExcelFile(io.BytesIO(file_bytes), engine="pyxlsb") as workbook:
-        for tech in ["2G", "3G", "4G", "5G"]:
-            sheet = _find_sheet(workbook.sheet_names, tech)
-            if sheet:
-                df = pd.read_excel(workbook, sheet_name=sheet, skiprows=1)
-                
-                # Clean headers just in case they're pushed down
-                if any(str(col).startswith("Unnamed") for col in df.columns[:3]):
-                    df.columns = df.iloc[0].astype(str)
-                    df = df[1:].reset_index(drop=True)
-                    
-                df = _clean_columns(df)
-                df['Technology'] = tech
-                dfs.append(df)
-    if dfs:
-        return pd.concat(dfs, ignore_index=True)
-    return pd.DataFrame()
-
-
 # --- LOGOS SECTION ---
 st.sidebar.markdown("<br>", unsafe_allow_html=True)
 logo_col1, logo_col2, logo_col3 = st.sidebar.columns(3)
@@ -939,18 +914,31 @@ with col2:
             try:
                 util_dfs = load_utilization_file(st.session_state['util_file_bytes'])
                 
-                # 1. Filter Cell Details
+                # 🚀 NEW BULLETPROOF FILTERING: Grab active PLA IDs directly from the rendered map pins
+                active_pla_ids = set()
+                if not filtered_sites.empty and "PLA ID" in filtered_sites.columns:
+                    active_pla_ids = set(filtered_sites["PLA ID"].dropna().astype(str))
+                
+                # 1. Filter Cell Details using PLA ID (Fallback to PSGC if PLA ID is missing)
                 util_cell_df = util_dfs.get("Cell Details", pd.DataFrame())
-                if not util_cell_df.empty and active_psgcs:
+                if not util_cell_df.empty:
+                    cell_pla_col = _find_column(util_cell_df, "PLA ID")
                     cell_psg_col = _find_column(util_cell_df, "CITY PSG CODE", "CITY_PSG_CODE")
-                    if cell_psg_col:
+                    
+                    if cell_pla_col and active_pla_ids:
+                        util_cell_df = util_cell_df[util_cell_df[cell_pla_col].astype(str).isin(active_pla_ids)]
+                    elif cell_psg_col and active_psgcs:
                         util_cell_df = util_cell_df[util_cell_df[cell_psg_col].isin(active_psgcs)]
                 
-                # 2. Filter Sector Details dynamically fixed by updated header logic
+                # 2. Filter Sector Details dynamically (PLA ID first, then PSGC)
                 util_sector_df = util_dfs.get("Sector Details", pd.DataFrame())
-                if not util_sector_df.empty and active_psgcs:
+                if not util_sector_df.empty:
+                    sec_pla_col = _find_column(util_sector_df, "PLA ID")
                     sec_psg_col = _find_column(util_sector_df, "City PSG Code", "CITY PSG CODE", "CITY_PSG_CODE")
-                    if sec_psg_col:
+                    
+                    if sec_pla_col and active_pla_ids:
+                        util_sector_df = util_sector_df[util_sector_df[sec_pla_col].astype(str).isin(active_pla_ids)]
+                    elif sec_psg_col and active_psgcs:
                         util_sector_df = util_sector_df[util_sector_df[sec_psg_col].isin(active_psgcs)]
                         
                 # 3. Filter ENODE_BBU_Board strictly based on active eNodeB names from Cell Details
@@ -1272,35 +1260,15 @@ with tab_chart:
         st.caption("Trend line chart unavailable: Missing time or metric columns.")
 
 with tab_cell_site:
-    st.write("**FILTERED SITE & SECTOR DETAILS:**")
-    st.caption("Displays granular antenna details (Azimuth, M-Tilt, E-Tilt, ACL, Lat, Long) for the currently filtered area.")
+    st.write("**FILTERED CELL SITE DATA:**")
+    st.caption("Displays raw cell site logic and sector counts for the currently filtered geography.")
     
-    if st.session_state.get('net_file_bytes') is not None:
-        try:
-            sector_df = load_sector_details(st.session_state['net_file_bytes'])
-            if not sector_df.empty and 'filtered_sites' in locals() and not filtered_sites.empty:
-                pla_col_sec = _find_column(sector_df, "PLA ID")
-                if pla_col_sec:
-                    sector_df[pla_col_sec] = sector_df[pla_col_sec].map(_pla_id)
-                    active_plas = filtered_sites['PLA ID'].dropna().unique()
-                    display_df = sector_df[sector_df[pla_col_sec].isin(active_plas)].copy()
-                    
-                    # Target specific keywords for the antenna details
-                    keep_keywords = ["PLA ID", "SITE NAME", "SECTOR", "TECHNOLOGY", "LAT", "LON", "AZI", "TILT", "MECH", "ELEC", "ACL"]
-                    cols_to_show = [col for col in display_df.columns if any(k in str(col).upper() for k in keep_keywords)]
-                    
-                    if cols_to_show:
-                        st.dataframe(display_df[cols_to_show], use_container_width=True, height=450, hide_index=True)
-                    else:
-                        st.dataframe(display_df, use_container_width=True, height=450, hide_index=True)
-                else:
-                    st.dataframe(sector_df, use_container_width=True, height=450, hide_index=True)
-            else:
-                st.info("No site details available for the selected filters.")
-        except Exception as e:
-            st.error(f"Error loading sector details: {e}")
+    if 'filtered_sites' in locals() and not filtered_sites.empty:
+        st.dataframe(filtered_sites, use_container_width=True, height=450, hide_index=True)
+    elif st.session_state.get('net_file_bytes') is None:
+        st.warning("⚠️ Network Grouplist not loaded. Please select or upload it in the sidebar to view cell sites.")
     else:
-        st.warning("⚠️ Network Grouplist not loaded. Please select or upload it in the sidebar to view site details.")
+        st.info("No cell-site data is available for this selection.")
 
 with tab_util_cell:
     st.write("**GRANULAR CELL DETAILS & UTILIZATION:**")
