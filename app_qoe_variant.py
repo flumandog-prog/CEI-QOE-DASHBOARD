@@ -796,9 +796,7 @@ with col1:
         st.metric("VoLTE QoE", f"{get_avg(filtered_df, 'AVG Volte QOE'):.2f}")
 
 with col2:
-    header_col, popup_col = st.columns([3, 1])
-    with header_col:
-        st.subheader("Geographic Profiling Map")
+    st.subheader("Geographic Profiling Map")
     
     if st.session_state.get('net_file_bytes') is None and (show_active or show_decom):
         st.warning("⚠️ Please upload the Network Grouplist (XLSB) file in the sidebar to view cell site markers.")
@@ -899,15 +897,6 @@ with col2:
                         util_df = util_df[util_df[util_psg_col].isin(active_psgcs)]
             except Exception as util_error:
                 st.error(f"Unable to process Utilization data: {util_error}")
-
-        # --- UI OPTIMIZATION 1: POPOVER CELL SITE DATA ---
-        with popup_col:
-            with st.popover("📊 View Cell Site Data", use_container_width=True):
-                if filtered_sites.empty:
-                    st.info("No cell-site data is available for this selection.")
-                else:
-                    st.markdown("**Filtered Cell Site Data**")
-                    st.dataframe(filtered_sites, use_container_width=True, height=400)
 
         if lightweight_geo_data['features']:
             
@@ -1147,13 +1136,18 @@ with col2:
             if needs_rerun:
                 st.rerun()
 
-# --- TABBED DATA VIEW SECTION (RETAINED) ---
+# --- TABBED DATA VIEW SECTION ---
 st.markdown("---")
 tab_custom_css = """<style>div[data-baseweb="tab-list"] {border-bottom: 2px solid #000000 !important;} button[data-baseweb="tab"] {border: 2px solid #a0a0a0 !important; border-radius: 8px 8px 0px 0px !important; padding: 12px 24px !important; margin-right: 6px !important; font-weight: 900 !important; font-size: 18px !important; background-color: #f1f3f6 !important; color: #555555 !important;} button[data-baseweb="tab"][aria-selected="true"] {border: 2px solid #000000 !important; border-bottom: 3px solid #ffffff !important; background-color: #ffffff !important; color: #000000 !important;}</style>"""
 st.markdown(tab_custom_css, unsafe_allow_html=True)
 
-# Retaining the three tabs as requested
-tab_chart, tab_site_data, tab_data = st.tabs(["Performance Trend Line Chart", "📊 Sector & Hardware Utilization", "Raw Data File"])
+# Upgraded to 4 distinct tabs to hold all data natively inside the ribbon
+tab_chart, tab_cell_site, tab_util, tab_data = st.tabs([
+    "Performance Trend Line Chart", 
+    "📍 View Cell Site Data", 
+    "📊 Sector & Hardware Utilization", 
+    "Raw Data File"
+])
 
 with tab_chart:
     avg_columns = [col for col in filtered_df.columns if 'AVG' in col.upper()]
@@ -1203,17 +1197,29 @@ with tab_chart:
     else:
         st.caption("Trend line chart unavailable: Missing time or metric columns.")
 
+# Restored the missing Cell Site Data directly into the ribbon tab
+with tab_cell_site:
+    st.write("**FILTERED CELL SITE DATA:**")
+    st.caption("Displays raw cell site logic and sector counts for the currently filtered geography.")
+    
+    if 'filtered_sites' in locals() and not filtered_sites.empty:
+        st.dataframe(filtered_sites, use_container_width=True, height=400, hide_index=True)
+    elif st.session_state.get('net_file_bytes') is None:
+        st.warning("⚠️ Network Grouplist not loaded. Please select or upload it in the sidebar to view cell sites.")
+    else:
+        st.info("No cell-site data is available for this selection.")
+
 # Retained Detailed Data Tab, specifically for Utilization Data
-with tab_site_data:
+with tab_util:
     st.write("**GRANULAR SECTOR & HARDWARE DETAILS:**")
-    st.caption("Displays utilization data for the currently filtered geography. For raw cell sites, refer to the Map popover.")
+    st.caption("Displays utilization data for the currently filtered geography.")
         
     if 'util_df' in locals() and not util_df.empty:
         st.markdown("**LTE eNodeB Utilization (Cell Details)**")
-        st.dataframe(util_df, use_container_width=True, height=350)
+        st.dataframe(util_df, use_container_width=True, height=350, hide_index=True)
     elif st.session_state.get('util_file_bytes') is None:
         st.warning("⚠️ Utilization Report not loaded. Please select or upload it in the sidebar to view detailed hardware metrics.")
                                   
 with tab_data:
     st.write("**RAW DATA VIEW:**")
-    st.dataframe(filtered_df, use_container_width=True)
+    st.dataframe(filtered_df, use_container_width=True, hide_index=True)
