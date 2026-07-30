@@ -382,29 +382,30 @@ def load_master_network_file(file_bytes):
         base = pd.concat([base, decommissioned_only_sites], ignore_index=True, sort=False)
     return base.dropna(subset=[lat_col, lon_col])
 
-# --- MASTER XLSB UTILIZATION LOADER ---
-@st.cache_data(ttl=3600, show_spinner="Processing Utilization Report...")
+# --- UPGRADED MASTER XLSB UTILIZATION LOADER (MULTI-SHEET) ---
+@st.cache_data(ttl=3600, show_spinner="Processing Complete Utilization Report (Multiple Sheets)...")
 def load_utilization_file(file_bytes):
-    """Parses Cell Details and purges unmappable ghost data."""
+    """Parses Cell Details, Sector Details, and ENODE_BBU_Board."""
+    dfs = {}
     with pd.ExcelFile(io.BytesIO(file_bytes), engine="pyxlsb") as workbook:
-        if "Cell Details" not in workbook.sheet_names:
-            raise ValueError("Utilization file must contain a 'Cell Details' sheet.")
-            
-        util_df = pd.read_excel(workbook, sheet_name="Cell Details")
-        util_df = _clean_columns(util_df)
-        
-        pla_col = _find_column(util_df, "PLA ID")
-        psg_col = _find_column(util_df, "CITY PSG CODE", "CITY_PSG_CODE")
-        
-        if pla_col:
-            util_df[pla_col] = util_df[pla_col].map(_pla_id)
-            
-        if psg_col:
-            # Strictly drop ghost data with no mapping identifiers
-            util_df = util_df.dropna(subset=[psg_col])
-            util_df[psg_col] = util_df[psg_col].map(_network_psgc)
-            
-        return util_df
+        for sheet_name in ["Cell Details", "Sector Details", "ENODE_BBU_Board"]:
+            if sheet_name in workbook.sheet_names:
+                df = pd.read_excel(workbook, sheet_name=sheet_name)
+                df = _clean_columns(df)
+                
+                # Map PLA ID if it exists
+                pla_col = _find_column(df, "PLA ID")
+                if pla_col:
+                    df[pla_col] = df[pla_col].map(_pla_id)
+                
+                # Map PSGC for geographic filtering if it exists
+                psg_col = _find_column(df, "CITY PSG CODE", "CITY_PSG_CODE", "City PSG Code")
+                if psg_col and sheet_name in ["Cell Details", "Sector Details"]:
+                    df = df.dropna(subset=[psg_col])
+                    df[psg_col] = df[psg_col].map(_network_psgc)
+                
+                dfs[sheet_name] = df
+    return dfs
 
 # --- LOGOS SECTION ---
 st.sidebar.markdown("<br>", unsafe_allow_html=True)
@@ -886,15 +887,43 @@ with col2:
             except Exception as network_error:
                 st.error(f"Unable to process cell-site data: {network_error}")
 
-        # Process Utilization Data specifically for the retained Utilization tab
-        util_df = pd.DataFrame()
+        # --- PROCESS UTILIZATION DATA ACROSS ALL THREE SHEETS ---
+        util_cell_df = pd.DataFrame()
+        util_sector_df = pd.DataFrame()
+        util_bbu_df = pd.DataFrame()
+        
         if st.session_state.get('util_file_bytes') is not None:
             try:
-                util_df = load_utilization_file(st.session_state['util_file_bytes'])
-                if not util_df.empty and active_psgcs:
-                    util_psg_col = _find_column(util_df, "CITY PSG CODE", "CITY_PSG_CODE")
-                    if util_psg_col:
-                        util_df = util_df[util_df[util_psg_col].isin(active_psgcs)]
+                util_dfs = load_utilization_file(st.session_state['util_file_bytes'])
+                
+                # 1. Filter Cell Details
+                util_cell_df = util_dfs.get("Cell Details", pd.DataFrame())
+                if not util_cell_df.empty and active_psgcs:
+                    cell_psg_col = _find_column(util_cell_df, "CITY PSG CODE", "CITY_PSG_CODE")
+                    if cell_psg_col:
+                        util_cell_df = util_cell_df[util_cell_df[cell_psg_col].isin(active_psgcs)]
+                
+                # 2. Filter Sector Details
+                util_sector_df = util_dfs.get("Sector Details", pd.DataFrame())
+                if not util_sector_df.empty and active_psgcs:
+                    sec_psg_col = _find_column(util_sector_df, "City PSG Code", "CITY PSG CODE")
+                    if sec_psg_col:
+                        util_sector_df = util_sector_df[util_sector_df[sec_psg_col].isin(active_psgcs)]
+                        
+                # 3. Filter ENODE_BBU_Board based on active eNodeB names from Cell Details
+                util_bbu_df = util_dfs.get("ENODE_BBU_Board", pd.DataFrame())
+                if not util_bbu_df.empty and not util_cell_df.empty:
+                    enode_col = _find_column(util_cell_df, "eNode B Name")
+                    bbu_col = _find_column(util_bbu_df, "eNodeB Cabinet.Subrack-Slot")
+                    
+                    if enode_col and bbu_col:
+                        active_enodes = set(util_cell_df[enode_col].dropna().astype(str))
+                        if active_enodes:
+                            # Fuzzy match: check if any active eNodeB name is inside the BBU cabinet string
+                            util_bbu_df = util_bbu_df[util_bbu_df[bbu_col].apply(
+                                lambda x: any(en in str(x) for en in active_enodes)
+                            )]
+                            
             except Exception as util_error:
                 st.error(f"Unable to process Utilization data: {util_error}")
 
@@ -1141,11 +1170,13 @@ st.markdown("---")
 tab_custom_css = """<style>div[data-baseweb="tab-list"] {border-bottom: 2px solid #000000 !important;} button[data-baseweb="tab"] {border: 2px solid #a0a0a0 !important; border-radius: 8px 8px 0px 0px !important; padding: 12px 24px !important; margin-right: 6px !important; font-weight: 900 !important; font-size: 18px !important; background-color: #f1f3f6 !important; color: #555555 !important;} button[data-baseweb="tab"][aria-selected="true"] {border: 2px solid #000000 !important; border-bottom: 3px solid #ffffff !important; background-color: #ffffff !important; color: #000000 !important;}</style>"""
 st.markdown(tab_custom_css, unsafe_allow_html=True)
 
-# Upgraded to 4 distinct tabs to hold all data natively inside the ribbon
-tab_chart, tab_cell_site, tab_util, tab_data = st.tabs([
+# Upgraded to 6 distinct tabs to hold all data natively inside the ribbon
+tab_chart, tab_cell_site, tab_util_cell, tab_util_sector, tab_util_bbu, tab_data = st.tabs([
     "Performance Trend Line Chart", 
     "📍 View Cell Site Data", 
-    "📊 Sector & Hardware Utilization", 
+    "📊 Cell Details", 
+    "📡 Sector Details",
+    "🎛️ eNodeB BBU Board",
     "Raw Data File"
 ])
 
@@ -1197,28 +1228,88 @@ with tab_chart:
     else:
         st.caption("Trend line chart unavailable: Missing time or metric columns.")
 
-# Restored the missing Cell Site Data directly into the ribbon tab
 with tab_cell_site:
     st.write("**FILTERED CELL SITE DATA:**")
     st.caption("Displays raw cell site logic and sector counts for the currently filtered geography.")
     
     if 'filtered_sites' in locals() and not filtered_sites.empty:
-        st.dataframe(filtered_sites, use_container_width=True, height=400, hide_index=True)
+        st.dataframe(filtered_sites, use_container_width=True, height=450, hide_index=True)
     elif st.session_state.get('net_file_bytes') is None:
         st.warning("⚠️ Network Grouplist not loaded. Please select or upload it in the sidebar to view cell sites.")
     else:
         st.info("No cell-site data is available for this selection.")
 
-# Retained Detailed Data Tab, specifically for Utilization Data
-with tab_util:
-    st.write("**GRANULAR SECTOR & HARDWARE DETAILS:**")
+with tab_util_cell:
+    st.write("**GRANULAR CELL DETAILS & UTILIZATION:**")
     st.caption("Displays utilization data for the currently filtered geography.")
         
-    if 'util_df' in locals() and not util_df.empty:
-        st.markdown("**LTE eNodeB Utilization (Cell Details)**")
-        st.dataframe(util_df, use_container_width=True, height=350, hide_index=True)
+    if 'util_cell_df' in locals() and not util_cell_df.empty:
+        st.markdown("### 📊 KEY HARDWARE METRICS (AVERAGES)")
+        
+        target_metrics = {
+            "Avg DL PRB (%)": "DL PRB",
+            "Avg UL PRB (%)": "UL PRB",
+            "Avg RRC Users": "RRC Connected User",
+            "Avg Transport Util": "Transport Utilization",
+            "Avg DL Throughput (Mbps)": "DL Cell Throughput",
+            "Avg DL Volume (GB)": "DL Cell Volume",
+            "Avg DL User T-Put (Mbps)": "DL User Throughput",
+            "Avg DL Active Users": "AVE DL Active User"
+        }
+        
+        metric_cols = st.columns(4)
+        col_idx = 0
+        
+        def find_util_col(name):
+            return next((c for c in util_cell_df.columns if name.upper() in str(c).upper()), None)
+        
+        for display_label, search_name in target_metrics.items():
+            matched_col = find_util_col(search_name)
+            
+            if matched_col:
+                numeric_series = pd.to_numeric(util_cell_df[matched_col], errors='coerce')
+                
+                if not numeric_series.isna().all():
+                    avg_val = numeric_series.mean()
+                    
+                    with metric_cols[col_idx % 4]:
+                        st.metric(label=display_label, value=f"{avg_val:.2f}")
+                    
+                    col_idx += 1
+        
+        if col_idx == 0:
+            st.info("Could not calculate metrics. Please ensure the uploaded file contains the expected numeric columns (e.g., DL PRB, Throughput).")
+        
+        st.markdown("---")
+        st.markdown("**LTE eNodeB Utilization (Cell Details - Complete)**")
+        st.dataframe(util_cell_df, use_container_width=True, height=450, hide_index=True)
+        
     elif st.session_state.get('util_file_bytes') is None:
-        st.warning("⚠️ Utilization Report not loaded. Please select or upload it in the sidebar to view detailed hardware metrics.")
+        st.warning("⚠️ Utilization Report not loaded. Please select or upload it in the sidebar.")
+    else:
+        st.info("No Cell Details found for the selected area.")
+
+with tab_util_sector:
+    st.write("**SECTOR DETAILS:**")
+    st.caption("Displays sector capacity, utilization flags, and coverage metrics for the currently filtered geography.")
+    
+    if 'util_sector_df' in locals() and not util_sector_df.empty:
+        st.dataframe(util_sector_df, use_container_width=True, height=450, hide_index=True)
+    elif st.session_state.get('util_file_bytes') is None:
+        st.warning("⚠️ Utilization Report not loaded. Please select or upload it in the sidebar.")
+    else:
+        st.info("No Sector Details found for the selected area.")
+
+with tab_util_bbu:
+    st.write("**eNODEB BBU BOARD METRICS:**")
+    st.caption("Displays CPU utilization and subrack slot configurations for the filtered BBU boards.")
+    
+    if 'util_bbu_df' in locals() and not util_bbu_df.empty:
+        st.dataframe(util_bbu_df, use_container_width=True, height=450, hide_index=True)
+    elif st.session_state.get('util_file_bytes') is None:
+        st.warning("⚠️ Utilization Report not loaded. Please select or upload it in the sidebar.")
+    else:
+        st.info("No BBU Board metrics found for the selected area.")
                                   
 with tab_data:
     st.write("**RAW DATA VIEW:**")
