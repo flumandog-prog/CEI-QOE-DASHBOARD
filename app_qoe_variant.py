@@ -601,15 +601,29 @@ if selected_brgy != "All" and 'Brgy' in filtered_df.columns:
 # --- NEW RANGE SLIDER METRIC FILTER ---
 st.sidebar.markdown("### METRIC FILTERS")
 if not filtered_df.empty and 'AVG CEI' in filtered_df.columns:
-    min_cei = float(filtered_df['AVG CEI'].min())
-    max_cei = float(filtered_df['AVG CEI'].max())
+    min_cei_val = float(filtered_df['AVG CEI'].min())
+    max_cei_val = float(filtered_df['AVG CEI'].max())
     
-    if min_cei != max_cei:
+    if min_cei_val != max_cei_val:
+        st.sidebar.markdown("**Filter by AVG CEI Score Range:**")
+        
+        # Create side-by-side explicit input boxes for Min and Max in the sidebar
+        col_min, col_max = st.sidebar.columns(2)
+        with col_min:
+            input_min = st.number_input("Min", min_value=min_cei_val, max_value=max_cei_val, value=min_cei_val, step=0.1)
+        with col_max:
+            input_max = st.number_input("Max", min_value=min_cei_val, max_value=max_cei_val, value=max_cei_val, step=0.1)
+            
+        # Ensure logical min/max before passing to slider to prevent errors if user types max < min
+        safe_min = min(input_min, input_max)
+        safe_max = max(input_min, input_max)
+        
         selected_cei_range = st.sidebar.slider(
-            "Filter by AVG CEI Score Range:",
-            min_value=min_cei,
-            max_value=max_cei,
-            value=(min_cei, max_cei),
+            "Visual Range Slider",
+            min_value=min_cei_val,
+            max_value=max_cei_val,
+            value=(safe_min, safe_max),
+            label_visibility="collapsed",
             step=0.1
         )
         filtered_df = filtered_df[
@@ -617,7 +631,7 @@ if not filtered_df.empty and 'AVG CEI' in filtered_df.columns:
             (filtered_df['AVG CEI'] <= selected_cei_range[1])
         ]
     else:
-        st.sidebar.info(f"AVG CEI is uniform at {min_cei:.2f}")
+        st.sidebar.info(f"AVG CEI is uniform at {min_cei_val:.2f}")
 
 st.sidebar.markdown("### DASHBOARD SETTINGS")
 
