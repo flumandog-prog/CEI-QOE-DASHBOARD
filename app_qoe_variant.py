@@ -391,6 +391,13 @@ def load_utilization_file(file_bytes):
         for sheet_name in ["Cell Details", "Sector Details", "ENODE_BBU_Board"]:
             if sheet_name in workbook.sheet_names:
                 df = pd.read_excel(workbook, sheet_name=sheet_name)
+                
+                # --- DYNAMIC HEADER ALIGNMENT ---
+                # Fixes the "Unnamed: 0" issue if headers are pushed down in Sector Details
+                if any(str(col).startswith("Unnamed") for col in df.columns[:3]):
+                    df.columns = df.iloc[0].astype(str)
+                    df = df[1:].reset_index(drop=True)
+                    
                 df = _clean_columns(df)
                 
                 # Map PLA ID if it exists
@@ -727,7 +734,23 @@ with st.sidebar.expander("📍 Site Markers", expanded=True):
         index=1,
         help="Select the icon used to display cell sites on the map."
     )
-    show_active = st.checkbox("Show Active Sites", value=False)
+    
+    # --- AUTO-TOGGLE LOGIC ---
+    current_geo = f"{selected_province}_{selected_town}_{selected_brgy}"
+    if 'last_geo' not in st.session_state:
+        st.session_state.last_geo = current_geo
+        st.session_state.show_active = False
+
+    # Force checkbox to True if user drills down, and False if they reset to "All"
+    if current_geo != st.session_state.last_geo:
+        if current_geo != "All_All_All":
+            st.session_state.show_active = True
+        else:
+            st.session_state.show_active = False
+        st.session_state.last_geo = current_geo
+
+    # Bind the checkbox to the session state key
+    show_active = st.checkbox("Show Active Sites", key="show_active")
     show_decom = st.checkbox("Show Decommissioned Sites", value=False)
 
 fa_icon_map = {
@@ -879,7 +902,6 @@ with col2:
                         elif not show_active and not show_decom:
                             filtered_sites = filtered_sites.iloc[0:0]
                             
-                            
             except Exception as network_error:
                 st.error(f"Unable to process cell-site data: {network_error}")
 
@@ -899,18 +921,18 @@ with col2:
                     if cell_psg_col:
                         util_cell_df = util_cell_df[util_cell_df[cell_psg_col].isin(active_psgcs)]
                 
-                # 2. Filter Sector Details
+                # 2. Filter Sector Details dynamically fixed by updated header logic
                 util_sector_df = util_dfs.get("Sector Details", pd.DataFrame())
                 if not util_sector_df.empty and active_psgcs:
-                    sec_psg_col = _find_column(util_sector_df, "City PSG Code", "CITY PSG CODE")
+                    sec_psg_col = _find_column(util_sector_df, "City PSG Code", "CITY PSG CODE", "CITY_PSG_CODE")
                     if sec_psg_col:
                         util_sector_df = util_sector_df[util_sector_df[sec_psg_col].isin(active_psgcs)]
                         
-                # 3. Filter ENODE_BBU_Board based on active eNodeB names from Cell Details
+                # 3. Filter ENODE_BBU_Board strictly based on active eNodeB names from Cell Details
                 util_bbu_df = util_dfs.get("ENODE_BBU_Board", pd.DataFrame())
                 if not util_bbu_df.empty and not util_cell_df.empty:
                     enode_col = _find_column(util_cell_df, "eNode B Name")
-                    bbu_col = _find_column(util_bbu_df, "eNodeB Cabinet.Subrack-Slot")
+                    bbu_col = _find_column(util_bbu_df, "eNodeB Cabinet.Subrack-Slot", "AREA", "ENODEB")
                     
                     if enode_col and bbu_col:
                         active_enodes = set(util_cell_df[enode_col].dropna().astype(str))
