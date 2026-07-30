@@ -914,18 +914,31 @@ with col2:
             try:
                 util_dfs = load_utilization_file(st.session_state['util_file_bytes'])
                 
-                # 1. Filter Cell Details
+                # 🚀 NEW BULLETPROOF FILTERING: Grab active PLA IDs directly from the rendered map pins
+                active_pla_ids = set()
+                if not filtered_sites.empty and "PLA ID" in filtered_sites.columns:
+                    active_pla_ids = set(filtered_sites["PLA ID"].dropna().astype(str))
+                
+                # 1. Filter Cell Details using PLA ID (Fallback to PSGC if PLA ID is missing)
                 util_cell_df = util_dfs.get("Cell Details", pd.DataFrame())
-                if not util_cell_df.empty and active_psgcs:
+                if not util_cell_df.empty:
+                    cell_pla_col = _find_column(util_cell_df, "PLA ID")
                     cell_psg_col = _find_column(util_cell_df, "CITY PSG CODE", "CITY_PSG_CODE")
-                    if cell_psg_col:
+                    
+                    if cell_pla_col and active_pla_ids:
+                        util_cell_df = util_cell_df[util_cell_df[cell_pla_col].astype(str).isin(active_pla_ids)]
+                    elif cell_psg_col and active_psgcs:
                         util_cell_df = util_cell_df[util_cell_df[cell_psg_col].isin(active_psgcs)]
                 
-                # 2. Filter Sector Details dynamically fixed by updated header logic
+                # 2. Filter Sector Details dynamically (PLA ID first, then PSGC)
                 util_sector_df = util_dfs.get("Sector Details", pd.DataFrame())
-                if not util_sector_df.empty and active_psgcs:
+                if not util_sector_df.empty:
+                    sec_pla_col = _find_column(util_sector_df, "PLA ID")
                     sec_psg_col = _find_column(util_sector_df, "City PSG Code", "CITY PSG CODE", "CITY_PSG_CODE")
-                    if sec_psg_col:
+                    
+                    if sec_pla_col and active_pla_ids:
+                        util_sector_df = util_sector_df[util_sector_df[sec_pla_col].astype(str).isin(active_pla_ids)]
+                    elif sec_psg_col and active_psgcs:
                         util_sector_df = util_sector_df[util_sector_df[sec_psg_col].isin(active_psgcs)]
                         
                 # 3. Filter ENODE_BBU_Board strictly based on active eNodeB names from Cell Details
