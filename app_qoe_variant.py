@@ -879,10 +879,6 @@ with col2:
                         elif not show_active and not show_decom:
                             filtered_sites = filtered_sites.iloc[0:0]
                             
-                        # 🚀 MAP OPTIMIZATION 2: RENDER LIMIT TO PREVENT CRASHES
-                        if len(filtered_sites) > 3000:
-                            st.warning(f"⚠️ {len(filtered_sites):,} sites found in this wide area. Individual pins have been hidden to ensure fast map loading. Please filter by Town or Barangay to see them.")
-                            filtered_sites = pd.DataFrame() 
                             
             except Exception as network_error:
                 st.error(f"Unable to process cell-site data: {network_error}")
